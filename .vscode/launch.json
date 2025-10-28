@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "(gdb) Build and Debug Active File",
+      "type": "cppdbg", // C++ debugger
+      "request": "launch", // We want to launch the program
+      "program": "${fileDirname}/${fileBasenameNoExtension}", // The path to the executable (e.g., ./hello_world)
+      "args": [], // Any command-line arguments to pass to your program
+      "stopAtEntry": false, // Only stop at breakpoints
+      "cwd": "${fileDirname}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb", // Use the GNU Debugger
+      "miDebuggerPath": "/usr/bin/gdb", // Path to the debugger you installed
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      // This is the magic. Before launching, run the "task" named here:
+      "preLaunchTask": "C/C++: g++ build active file"
+    }
+  ]
+}
