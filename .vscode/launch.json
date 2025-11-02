@@ -2,17 +2,48 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "(gdb) Build and Debug Active File",
-      "type": "cppdbg", // C++ debugger
-      "request": "launch", // We want to launch the program
-      "program": "${fileDirname}/${fileBasenameNoExtension}", // The path to the executable (e.g., ./hello_world)
-      "args": [], // Any command-line arguments to pass to your program
-      "stopAtEntry": false, // Only stop at breakpoints
+      "name": "Debug Client",
+      "type": "cppdbg",
+      "request": "launch",
+      // Updated program name to match the Makefile
+      "program": "${fileDirname}/bittorrent_client",
+      "args": [
+        // Add a default torrent file to debug with
+        "../ubuntu-25.10-desktop-amd64.iso.torrent"
+      ],
+      "stopAtEntry": false,
       "cwd": "${fileDirname}",
       "environment": [],
       "externalConsole": false,
-      "MIMode": "gdb", // Use the GNU Debugger
-      "miDebuggerPath": "/usr/bin/gdb", // Path to the debugger you installed
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Set Disassembly Flavor to Intel",
+          "text": "-gdb-set disassembly-flavor intel",
+          "ignoreFailures": true
+        }
+      ],
+      // This task now runs "make client" before debugging
+      "preLaunchTask": "Build Client (make)"
+    },
+    {
+      "name": "Debug Tests",
+      "type": "cppdbg",
+      "request": "launch",
+      // This is the FIX: The program to debug is the executable,
+      // not the "run" target.
+      "program": "${fileDirname}/test_runner_executable",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${fileDirname}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
       "setupCommands": [
         {
           "description": "Enable pretty-printing for gdb",
@@ -20,8 +51,9 @@
           "ignoreFailures": true
         }
       ],
-      // This is the magic. Before launching, run the "task" named here:
-      "preLaunchTask": "C/C++: g++ build active file"
+      // This task now runs "make tests" before debugging
+      "preLaunchTask": "Build Tests (make)"
     }
   ]
 }
+

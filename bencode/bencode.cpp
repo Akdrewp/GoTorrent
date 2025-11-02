@@ -214,59 +214,6 @@ BencodeValue parseDictionary(const std::vector<char>& fileBytes, size_t& index) 
   return bv;
 }
 
-/**
- * @brief Finds the index *after* the end of a bencoded value.
- * @param bytes The raw file bytes.
- * @param index The starting index of the value.
- * @return The index *after* the value's end.
- */
-size_t findBencodedValueEnd(const std::vector<char>& bytes, size_t index) {
-    if (index >= bytes.size()) {
-        throw std::runtime_error("Unexpected EOF while finding end.");
-    }
-
-    char type = bytes[index];
-
-    if (type == 'i') {
-        // Integer: i...e
-        while (index < bytes.size() && bytes[index] != 'e') {
-            index++;
-        }
-        if (index == bytes.size()) {
-             throw std::runtime_error("Integer not terminated.");
-        }
-        return index + 1; // Return index after 'e'
-    } 
-    else if (std::isdigit(type)) {
-        // String: <len>:<data>
-        std::string lengthStr;
-        while (index < bytes.size() && std::isdigit(bytes[index])) {
-            lengthStr += bytes[index];
-            index++;
-        }
-        if (index == bytes.size() || bytes[index] != ':') {
-            throw std::runtime_error("String length not followed by ':'.");
-        }
-        index++; // skip ':'
-        size_t length = std::stoull(lengthStr);
-        return index + length; // Return index after data
-    }
-    else if (type == 'l' || type == 'd') {
-        // List or Dictionary: l...e or d...e
-        index++; // Skip 'l' or 'd'
-        while (index < bytes.size() && bytes[index] != 'e') {
-            // Recursively find the end of each element inside
-            index = findBencodedValueEnd(bytes, index);
-        }
-        if (index == bytes.size()) {
-             throw std::runtime_error("List/dict not terminated.");
-        }
-        return index + 1; // Return index after 'e'
-    }
-    else {
-        throw std::runtime_error("Unknown value type at " + std::to_string(index));
-    }
-}
 
 /**
  * @brief router for current bencode
