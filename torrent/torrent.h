@@ -26,4 +26,16 @@ struct TorrentData {
  */
 TorrentData parseTorrentFile(const std::string& torrentFilePath);
 
+/**
+ * @brief Gets the total length from a Bencode info dictionary
+ * Single file torrents have a "length" field to read
+ * 
+ * Multi file torrents have a "files" key each with their own
+ * "length" field which must be totalled up
+ * @param infoDict The torrent info dictionary
+ * @return The total length of the file(s) in the info dictionary
+ * @throws std::runtime_error on incorrect format
+ */
+long long getTotalLength(const BencodeDict& infoDict);
+
 #endif // TORRENT_H

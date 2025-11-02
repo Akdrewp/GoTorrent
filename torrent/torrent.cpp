@@ -115,3 +115,76 @@ TorrentData parseTorrentFile(const std::string& torrentFilePath) {
 
   return torrent;
 }
+
+
+/**
+ * @brief Gets the total length from a Bencode info dictionary
+ * Single file torrents have a "length" field to read
+ * 
+ * Multi file torrents have a "files" key each with their own
+ * "length" field which must be totalled up
+ * @param infoDict The torrent info dictionary
+ * @return The total length of the file(s) in the info dictionary
+ * @throws std::runtime_error on incorrect format
+ */
+long long getTotalLength(const BencodeDict& infoDict) {
+
+  /**
+   * std::get_if<<BencodeValue Type>>(&(<BencodeDict iterator>->second->value))
+   * <BencodeDict iterator> is the iterator for our map
+   * 
+   * <BencodeDict iterator>->second gets the second value
+   * which is the "value" part.
+   * <BencodeDict iterator>->first would be the key for the map
+   * 
+   * <BencodeDict iterator>->second->value
+   * Since <BencodeDict iterator>->second holds a pointer to a map
+   * access it via pointer.
+   * 
+   * std::get_if<<BencodeValue Type>>(&(<BencodeDict iterator>->second->value))
+   * Gets the BencodeValue Type from the "value"
+   *
+   */
+  // Case 1: Single-file torrent. Check for "length" key.
+  auto lengthIt = infoDict.find("length");
+  if (lengthIt != infoDict.end()) {
+    // Found "length", get the value
+    // The value is a unique_ptr<BencodeValue>, we dereference it
+    // then access its .value (the variant), then get the long long
+    if (auto* val = std::get_if<long long>(&(lengthIt->second->value))) {
+        return *val;
+    } else {
+        throw std::runtime_error("Invalid torrent: 'length' is not an integer.");
+    }
+  }
+
+  // Case 2: Multi-file torrent. Check for "files" key.
+  auto filesIt = infoDict.find("files");
+  if (filesIt != infoDict.end()) {
+    long long totalSize = 0;
+    
+    // Get the list of files
+    if (auto* fileList = std::get_if<BencodeList>(&(filesIt->second->value))) {
+      // Loop through each file in the list
+      for (const auto& file_bv_ptr : *fileList) {
+        // Each item in the list is a dictionary
+        if (auto* fileDict = std::get_if<BencodeDict>(&(file_bv_ptr->value))) {
+          
+          // Find the "length" key in this file's dictionary
+          auto fileLengthIt = fileDict->find("length");
+          if (fileLengthIt != fileDict->end()) {
+            if (auto* fileLen = std::get_if<long long>(&(fileLengthIt->second->value))) {
+              totalSize += *fileLen;
+            }
+          }
+        }
+      }
+      return totalSize;
+    } else {
+      throw std::runtime_error("Invalid torrent: 'files' is not a list.");
+    }
+  }
+
+  // Case 3: Neither key was found.
+  throw std::runtime_error("Invalid 'info' dictionary: missing 'length' or 'files'.");
+}
