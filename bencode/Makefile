@@ -1,7 +1,7 @@
 # This Makefile builds bencode related files
 #
 # To use:
-# - `make client`: Builds your main bencode_client
+# - `make client`: Builds your main bittorrent_client
 # - `make tests`: Builds your test runner
 # - `make run_tests`: Builds AND runs your tests
 # - `make clean`: Removes all built files
@@ -21,12 +21,16 @@ CXXFLAGS += -I$(BCODE_DIR)
 vpath %.cpp .:$(BCODE_DIR)
 vpath %.h .:$(BCODE_DIR)
 
-# 3. Test Flags
+# Include libraries
+
+# Test Libraries
 GTEST_INCLUDE = /usr/include
 GTEST_LIBS = -lgtest -lpthread
 
-# 4. Our Source Files
-# List the *source file names*. 'make' will find them using vpath.
+# Client Libraries
+CRYPTO_LIBS = -l crypto
+
+# Source Files
 CLIENT_SRCS = main.cpp bencode.cpp
 TEST_SRCS = bencode_test.cpp bencode.cpp
 
@@ -35,11 +39,11 @@ TEST_SRCS = bencode_test.cpp bencode.cpp
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 
-# 5. Target Names
+# Target Names
 CLIENT_TARGET = bittorrent_client
 TEST_TARGET = test_runner_executable
 
-# 6. Build Rules
+# Build Rules
 
 # This is the default rule (runs when you just type `make`)
 all: client
@@ -48,7 +52,7 @@ all: client
 client: $(CLIENT_TARGET)
 
 $(CLIENT_TARGET): $(CLIENT_OBJS)
-	$(CXX) $(CXXFLAGS) -o $(CLIENT_TARGET) $(CLIENT_OBJS)
+	$(CXX) $(CXXFLAGS) -o $(CLIENT_TARGET) $(CLIENT_OBJS) $(CRYPTO_LIBS)
 
 # Rule to build the test runner executable
 tests: $(TEST_TARGET)
@@ -69,4 +73,3 @@ run_tests: tests
 # Rule to clean up
 clean:
 	rm -f $(CLIENT_TARGET) $(TEST_TARGET) *.o
-

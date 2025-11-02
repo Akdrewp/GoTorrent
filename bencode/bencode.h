@@ -106,5 +106,13 @@ BencodeValue parseDictionary(const std::vector<char>& fileBytes, size_t& index);
  */
 BencodeValue parseBencodedValue(const std::vector<char>& fileBytes, size_t& index);
 
+/**
+ * @brief Finds the index *after* the end of a bencoded value.
+ * @param bytes The raw file bytes.
+ * @param index The starting index of the value.
+ * @return The index *after* the value's end.
+ */
+size_t findBencodedValueEnd(const std::vector<char>& bytes, size_t index);
+
 #endif // BENCODE_H
 
