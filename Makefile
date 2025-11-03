@@ -13,8 +13,8 @@ CXX = g++
 CXXFLAGS = -g -Wall -std=c++17
 
 # 2. Libraries
-# Add libraries for the client (OpenSSL)
-LIBS = -lcrypto
+# Add libraries for the client (OpenSSL, cURL)
+LIBS = -lcrypto -lcurl
 # Add libraries for testing (GoogleTest)
 TEST_LIBS = -lgtest -lgtest_main -pthread
 

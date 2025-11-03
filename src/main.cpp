@@ -174,6 +174,23 @@ int main(int argc, char* argv[]) {
     std::cout << "\n--- COMPLETE TRACKER URL ---" << std::endl;
     std::cout << trackerUrl << std::endl;
 
+    std::cout << "\n--- SENDING REQUEST TO TRACKER ---" << std::endl;
+    std::string trackerResponse = sendTrackerRequest(trackerUrl);
+
+    std::cout << "Tracker raw response size: " << trackerResponse.size() << " bytes" << std::endl;
+
+    // Parse the tracker's response
+    // Should be in bencode
+    std::cout << "\n--- PARSING TRACKER RESPONSE ---" << std::endl;
+    size_t index = 0;
+    // Convert string to vector<char> for our parser
+    std::vector<char> responseBytes(trackerResponse.begin(), trackerResponse.end());
+    BencodeValue parsedResponse = parseBencodedValue(responseBytes, index);
+    
+    // Print the parsed response
+    printBencodeValue(parsedResponse);
+    std::cout << std::endl;
+
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;

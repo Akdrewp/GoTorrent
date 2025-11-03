@@ -1,4 +1,5 @@
 #include "tracker.h"
+#include <curl/curl.h> // For curl
 
 /**
  * @brief URL-encodes a string of raw bytes.
@@ -32,8 +33,67 @@ std::string urlEncode(const std::string& data) {
 }
 
 /**
+ * @brief cURL callback function to write response data into a std::string.
+ *
+ * Provided by libcurl
+ *
+ * @param contents Pointer to the data chunk received.
+ * @param size Size of each data element (always 1 byte).
+ * @param nmemb Number of data elements.
+ * @param userp Pointer to our std::string.
+ * @return The total number of bytes handled.
+ */
+static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+  // userp is the std::string* we passed in
+  // Append the new data to it.
+  ((std::string*)userp)->append((char*)contents, size * nmemb);
+  return size * nmemb;
+}
+
+/**
+ * @brief Sends an HTTP GET request to the given URL using libcurl.
+ */
+std::string sendTrackerRequest(const std::string& url) {
+
+  CURL *curl;
+  CURLcode res;
+  std::string responseBuffer; // This string will hold our response
+
+  curl = curl_easy_init();
+  if (curl) {
+      // Set the URL
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+
+      // Set the "write function" (our callback)
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+
+      // Set the "write data" (the string to write to)
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBuffer);
+
+      // Set a timeout 10 seconds
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+      // Perform the request
+      // Since no other options are selected
+      // automatically sends GET request
+      res = curl_easy_perform(curl);
+
+      // Clean up
+      curl_easy_cleanup(curl);
+
+      if (res != CURLE_OK) {
+          // Request failed
+          throw std::runtime_error("curl_easy_perform() failed: " + std::string(curl_easy_strerror(res)));
+      }
+  } else {
+      throw std::runtime_error("curl_easy_init() failed.");
+  }
+
+  return responseBuffer;
+}
+
+/**
  * @brief Assembles the complete HTTP GET request URL for the tracker.
- * 
  * 
  * compact=1 set by default as it is most common to send this
  * style for trackers.

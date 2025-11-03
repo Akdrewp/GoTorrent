@@ -2,6 +2,7 @@
 #define TRACKER_H
 
 #include <string>
+#include <string>
 #include <vector>
 #include <sstream>   // For std::stringstream
 #include <iomanip>   // For std::hex, std::setw
@@ -47,6 +48,15 @@ std::string buildTrackerUrl(
     long long left,
     int compact
 );
+
+/**
+ * @brief Sends an HTTP GET request to the given URL using libcurl.
+ *
+ * @param url The complete, URL-encoded tracker request URL.
+ * @return The raw response body from the tracker (which is bencoded).
+ * @throws std::runtime_error on a cURL error.
+ */
+std::string sendTrackerRequest(const std::string& url);
 
 
 #endif // TRACKER_H
