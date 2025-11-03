@@ -2,11 +2,19 @@
 #define TRACKER_H
 
 #include <string>
-#include <string>
 #include <vector>
 #include <sstream>   // For std::stringstream
 #include <iomanip>   // For std::hex, std::setw
 #include <cctype>    // For std::isalnum
+#include <cstdint>   // For uint16_t
+
+/**
+ * @brief Holds information for a single peer.
+ */
+struct Peer {
+  std::string ip;
+  uint16_t port;
+};
 
 /**
  * @brief URL-encodes a string of raw bytes.
@@ -58,5 +66,13 @@ std::string buildTrackerUrl(
  */
 std::string sendTrackerRequest(const std::string& url);
 
+/**
+ * @brief Parses a compact (binary) peer list from a tracker response.
+ *
+ * @param peers A string where each peer is 6 bytes (4-byte IP, 2-byte Port).
+ * @return A vector of Peer structs.
+ * @throws std::runtime_error if the peer string has an invalid length.
+ */
+std::vector<Peer> parseCompactPeers(const std::string& peers);
 
 #endif // TRACKER_H

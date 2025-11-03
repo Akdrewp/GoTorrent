@@ -20,7 +20,7 @@ TEST_LIBS = -lgtest -lgtest_main -pthread
 
 # 3. Project Structure
 # Add all directories that contain .h files
-INC_DIRS = -Isrc -Ibencode -Itorrent -Itracker
+INC_DIRS = -Isrc -Ibencode -Itorrent -Itracker -Iclient
 CXXFLAGS += $(INC_DIRS)
 
 # 4. Targets
@@ -32,7 +32,9 @@ TEST_TARGET = test_runner_executable
 # /src
 # /bencode
 # /torrent
-CLIENT_SRCS = $(wildcard src/*.cpp) $(wildcard bencode/*.cpp) $(wildcard torrent/*.cpp) $(wildcard tracker/*.cpp)
+# /tracker
+# /client
+CLIENT_SRCS = $(wildcard src/*.cpp) $(wildcard bencode/*.cpp) $(wildcard torrent/*.cpp) $(wildcard tracker/*.cpp) $(wildcard client/*.cpp)
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 
 # Define source files for the TESTS

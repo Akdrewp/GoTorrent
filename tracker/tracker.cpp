@@ -1,5 +1,7 @@
 #include "tracker.h"
+#include <cstring>     // For memcpy
 #include <curl/curl.h> // For curl
+#include <arpa/inet.h> // For ntohs and inet_ntoa
 
 /**
  * @brief URL-encodes a string of raw bytes.
@@ -146,4 +148,42 @@ std::string buildTrackerUrl(
   ss << "&event=started";
 
   return ss.str();
+}
+
+/**
+ * @brief Parses a compact (binary) peer list from a tracker response.
+ *
+ * @param peers A string where each peer is 6 bytes (4-byte IP, 2-byte Port).
+ * @return A vector of Peer structs.
+ * @throws std::runtime_error if the peer string has an invalid length.
+ */
+std::vector<Peer> parseCompactPeers(const std::string& peers) {
+  std::vector<Peer> peerList;
+  
+  // Check that the string length is a multiple of 6
+  if (peers.length() % 6 != 0) {
+    throw std::runtime_error("Invalid compact peer list: length is not a multiple of 6.");
+  }
+
+  // Get a raw pointer to the data
+  const unsigned char* data = reinterpret_cast<const unsigned char*>(peers.c_str());
+
+  // Loop 6 bytes at a time
+  for (size_t i = 0; i < peers.length(); i += 6) {
+    Peer p;
+
+    // Parse the IP
+    struct in_addr ip_addr;
+    memcpy(&ip_addr.s_addr, &data[i], 4);
+    p.ip = inet_ntoa(ip_addr); // Converts network-order IP to "x.x.x.x" string
+
+    // Parse the Port
+    uint16_t port_net_order;
+    memcpy(&port_net_order, &data[i+4], 2); // next 2 bytes
+    p.port = ntohs(port_net_order);
+
+    peerList.push_back(p);
+  }
+
+  return peerList;
 }
