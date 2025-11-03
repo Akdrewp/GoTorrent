@@ -13,14 +13,17 @@ CXX = g++
 CXXFLAGS = -g -Wall -std=c++17
 
 # 2. Libraries
-# Add libraries for the client (OpenSSL, cURL)
-LIBS = -lcrypto -lcurl
+# Add libraries for the client
+# OpenSSL
+# cURL
+# boost
+LIBS = -lcrypto -lcurl -lboost_system
 # Add libraries for testing (GoogleTest)
 TEST_LIBS = -lgtest -lgtest_main -pthread
 
 # 3. Project Structure
 # Add all directories that contain .h files
-INC_DIRS = -Isrc -Ibencode -Itorrent -Itracker -Iclient
+INC_DIRS = -Isrc -Ibencode -Itorrent -Itracker -Iclient -Ipeer
 CXXFLAGS += $(INC_DIRS)
 
 # 4. Targets
@@ -34,7 +37,8 @@ TEST_TARGET = test_runner_executable
 # /torrent
 # /tracker
 # /client
-CLIENT_SRCS = $(wildcard src/*.cpp) $(wildcard bencode/*.cpp) $(wildcard torrent/*.cpp) $(wildcard tracker/*.cpp) $(wildcard client/*.cpp)
+# /peer
+CLIENT_SRCS = $(wildcard src/*.cpp) $(wildcard bencode/*.cpp) $(wildcard torrent/*.cpp) $(wildcard tracker/*.cpp) $(wildcard client/*.cpp) $(wildcard peer/*.cpp)
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 
 # Define source files for the TESTS
