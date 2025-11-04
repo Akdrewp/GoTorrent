@@ -118,10 +118,17 @@ Client::Client(asio::io_context& io_context, std::string torrentFilePath)
 {
 }
 
+// Defining the constructor here as default
+// allows for forward declaration of PeerConnection
+// in client.h.
+//
+Client::~Client() = default;
+
 void Client::run() {
   loadTorrent();
   requestPeers();
   connectToPeers();
+  startMessageLoop();
 }
 
 void Client::loadTorrent() {
@@ -230,13 +237,13 @@ void Client::connectToPeers() {
   const auto& firstPeer = peers_[0];
   try {
     // Create the connection object
-    PeerConnection peerConn(io_context_, firstPeer.ip, firstPeer.port);
+    peerConn_ = std::make_unique<PeerConnection>(io_context_, firstPeer.ip, firstPeer.port);
 
     // Attempt to connect
-    peerConn.connect();
+    peerConn_->connect();
 
     // Attempt to handshake
-    std::vector<unsigned char> peerResponseId = peerConn.performHandshake(
+    std::vector<unsigned char> peerResponseId = peerConn_->performHandshake(
       torrent_.infoHash,
       peerId_
     );
@@ -253,3 +260,87 @@ void Client::connectToPeers() {
   }
 }
 
+/**
+ * @brief Sends bitfields to connected peer.
+ */
+void Client::sendBitfieldToPeer() {
+  if (!peerConn_) {
+    std::cout << "\nNo active peer connection. Skipping bitfield exchange." << std::endl;
+    return;
+  }
+
+  std::cout << "\n--- PERFORMING BITFIELD EXCHANGE ---" << std::endl;
+  try {
+    // Calculate our bitfield size
+    auto& infoVal = torrent_.mainData.at("info")->value;
+    auto* infoDict = std::get_if<BencodeDict>(&infoVal);
+    if (!infoDict) throw std::runtime_error("Invalid info dictionary.");
+
+    auto& piecesVal = infoDict->at("pieces")->value;
+    auto* piecesStr = std::get_if<std::string>(&piecesVal);
+    if (!piecesStr) throw std::runtime_error("Invalid 'pieces' string.");
+
+    // Each piece has a hash in "pieces" each with length 20
+    // Amount of pieces is length of "pieces" / 20
+    size_t numPieces = piecesStr->length() / 20;
+
+    // Each bit in the bitfield corresponds to a piece being recieved
+    //
+    // Need amount of pieces / 8 (bits in byte) rounded up to hold
+    // trailing bits
+    size_t bitfieldSize = (numPieces + 7) / 8; // ceil(numPieces / 8.0)
+
+    // Create and send our bitfield (all zeros, we have no pieces)
+    std::vector<uint8_t> myBitfield(bitfieldSize, 0);
+    peerConn_->sendBitfield(myBitfield);
+
+
+  } catch (const std::exception& e) {
+    std::cerr << "Bitfield exchange failed: " << e.what() << std::endl;
+    peerConn_ = nullptr; // Connection failed, reset
+  }
+}
+
+void Client::startMessageLoop() {
+  if (!peerConn_) {
+    std::cout << "\nNo active peer connection. Skipping message loop." << std::endl;
+    return;
+  }
+
+  std::cout << "\n--- STARTING MESSAGE LOOP ---" << std::endl;
+  try {
+
+    sendBitfieldToPeer();
+
+    // Read incoming message response
+    std::cout << "Waiting for peer messages..." << std::endl;
+    // Just read 5 messages for now
+    // This probably should be a while loop?
+    // Not sure how to with asyncrous multiple peers
+    // @TODO
+    for (int i = 0; i < 5; ++i) {
+      PeerMessage msg = peerConn_->readMessage();
+
+      switch (msg.id) {
+        case 0: // choke
+          std::cout << "Received CHOKE" << std::endl;
+          // We are now choked by this peer
+          break;
+        case 1: // unchoke
+          std::cout << "Received UNCHOKE" << std::endl;
+          // We are now unchoked, we can request pieces
+          break;
+        case 5: // bitfield
+          std::cout << "Received BITFIELD (" << msg.payload.size() << " bytes)" << std::endl;
+          // TODO: Store this bitfield
+          break;
+        default:
+          std::cout << "Received unhandled message. ID: " << (int)msg.id << std::endl;
+      }
+    }
+
+  } catch (const std::exception& e) {
+    std::cerr << "Message loop failed: " << e.what() << std::endl;
+    peerConn_ = nullptr; // Connection failed, reset
+  }
+}

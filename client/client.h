@@ -9,6 +9,9 @@
 
 namespace asio = boost::asio;
 
+// Forward declrationg defined in peer.h
+class PeerConnection;
+
 /**
  * @brief Main BitTorrent client class.
  *
@@ -33,6 +36,14 @@ public:
    */
   void run();
 
+  /**
+   * @brief Destructor.
+   *
+   * Defined in the .cpp file to allow std::unique_ptr
+   * to work with a forward-declared PeerConnection.
+   */
+  ~Client();
+
 private:
   /**
    * @brief Loads torrent file, parses it, and generates our peer_id.
@@ -49,6 +60,16 @@ private:
    */
   void connectToPeers();
 
+  /**
+   * @brief Sends bitfields to connected peer.
+   */
+  void sendBitfieldToPeer();
+
+  /**
+   * @brief Sends our bitfield and starts the main loop for peer messages.
+   */
+  void startMessageLoop();
+
   // Member variables
   asio::io_context& io_context_;
   std::string torrentFilePath_;
@@ -57,6 +78,10 @@ private:
   std::string peerId_;
   std::vector<Peer> peers_;
   long long port_;
+  // Stores our active connection
+  // This is only one connection at a time for now.
+  // Later on convert to vector or combine with peers_
+  std::unique_ptr<PeerConnection> peerConn_;
 };
 
 #endif // CLIENT_H

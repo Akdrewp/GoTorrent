@@ -1,5 +1,5 @@
-#include "client.h"     // --- NEW: Include our main client logic ---
-#include <boost/asio.hpp> // --- NEW: Include Asio ---
+#include "client.h"       // Client header logic
+#include <boost/asio.hpp> // For Asio io_contex
 #include <curl/curl.h>    // For curl_global_init/cleanup
 #include <iostream>       // For std::cout, std::cerr
 #include <stdexcept>      // For std::runtime_error

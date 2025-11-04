@@ -121,3 +121,88 @@ std::vector<unsigned char> PeerConnection::performHandshake(
   memcpy(responsePeerId.data(), &response[48], 20);
   return responsePeerId;
 }
+
+  /**
+   * @brief Constructs and sends a Bitfield message (ID=5) to the peer.
+   * @param bitfield The raw bytes of the bitfield.
+   * @throws std::runtime_error on send failure.
+   */
+void PeerConnection::sendBitfield(const std::vector<uint8_t>& bitfield) {
+  // A bitfield message has ID = 5
+  std::vector<unsigned char> payload(bitfield.begin(), bitfield.end());
+  sendMessage(5, payload);
+  std::cout << "Sent bitfield (" << payload.size() << " bytes) to " << ip_ << std::endl;
+}
+
+/**
+ * @brief Reads a single peer message from the socket.
+ *
+ * This is a blocking call. It will read the 4-byte length prefix,
+ * then read the full message payload (ID + data).
+ *
+ * @return A PeerMessage struct.
+ * @throws std::runtime_error on read failure.
+ */
+PeerMessage PeerConnection::readMessage() {
+  try {
+    // Read the 4-byte length prefix
+    uint32_t length_net;
+    size_t lenRead = asio::read(socket_, asio::buffer(&length_net, 4), asio::transfer_exactly(4));
+    if (lenRead != 4) {
+      throw std::runtime_error("Failed to read message length prefix.");
+    }
+
+    // Convert from network byte order to host byte order
+    uint32_t length = ntohl(length_net);
+
+    // This is a "keep-alive" message
+    if (length == 0) {
+      return { 0, {} }; // ID 0, empty payload
+    }
+
+    // Read the rest of the message (ID + payload)
+    std::vector<unsigned char> messageBuffer(length);
+    size_t msgRead = asio::read(socket_, asio::buffer(messageBuffer), asio::transfer_exactly(length));
+    if (msgRead != length) {
+      throw std::runtime_error("Failed to read full message payload.");
+    }
+
+    // Separate the ID and the Payload
+    PeerMessage msg;
+    msg.id = messageBuffer[0]; // First byte is the ID
+    msg.payload.assign(messageBuffer.begin() + 1, messageBuffer.end()); // Rest is payload
+
+    return msg;
+
+  } catch (const std::exception& e) {
+    throw std::runtime_error("Failed to read message: " + std::string(e.what()));
+  }
+}
+
+/**
+ * @brief Sends a generic message to the peer.
+ * Client doesn't use this, each message will have own function
+ * Prepends the 4-byte length and 1-byte ID.
+ */
+void PeerConnection::sendMessage(uint8_t id, const std::vector<unsigned char>& payload) {
+  try {
+    // Calculate length
+    // 1 byte for ID + payload size
+    uint32_t length = 1 + payload.size();
+    uint32_t length_net = htonl(length); // Convert to network byte order
+
+    // Create a buffer to send
+    std::vector<asio::const_buffer> buffers;
+    buffers.push_back(asio::buffer(&length_net, 4));
+    buffers.push_back(asio::buffer(&id, 1));
+    if (!payload.empty()) {
+      buffers.push_back(asio::buffer(payload));
+    }
+
+    // Send the composed message
+    asio::write(socket_, buffers);
+
+  } catch (const std::exception& e) {
+    throw std::runtime_error("Failed to send message: " + std::string(e.what()));
+  }
+}
