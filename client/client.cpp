@@ -282,17 +282,17 @@ void Client::sendBitfieldToPeer() {
 
     // Each piece has a hash in "pieces" each with length 20
     // Amount of pieces is length of "pieces" / 20
-    size_t numPieces = piecesStr->length() / 20;
+    numPieces_ = piecesStr->length() / 20;
 
     // Each bit in the bitfield corresponds to a piece being recieved
     //
     // Need amount of pieces / 8 (bits in byte) rounded up to hold
     // trailing bits
-    size_t bitfieldSize = (numPieces + 7) / 8; // ceil(numPieces / 8.0)
+    size_t bitfieldSize = (numPieces_ + 7) / 8; // ceil(numPieces / 8.0)
 
     // Create and send our bitfield (all zeros, we have no pieces)
-    std::vector<uint8_t> myBitfield(bitfieldSize, 0);
-    peerConn_->sendBitfield(myBitfield);
+    myBitfield_.resize(bitfieldSize, 0);
+    peerConn_->sendBitfield(myBitfield_);
 
 
   } catch (const std::exception& e) {
@@ -343,4 +343,86 @@ void Client::startMessageLoop() {
     std::cerr << "Message loop failed: " << e.what() << std::endl;
     peerConn_ = nullptr; // Connection failed, reset
   }
+}
+
+void Client::handleChoke(PeerConnection& peer) {
+  std::cout << "Received CHOKE" << std::endl;
+  peer.peerChoking_ = true;
+}
+
+void Client::handleUnchoke(PeerConnection& peer) {
+  std::cout << "Received UNCHOKE" << std::endl;
+  peer.peerChoking_ = false;
+
+  // The peer is no longer choking us. If we are interested,
+  // we should start sending piece requests.
+  if (peer.amInterested_) {
+    std::cout << "Peer unchoked us and we are interested. Time to request pieces!" << std::endl;
+    // TODO: Add logic to pick a piece and send a request
+    // peer.sendRequest(...);
+  }
+}
+
+void Client::handleHave(PeerConnection& peer, const PeerMessage& msg) {
+  if (msg.payload.size() != 4) {
+    std::cerr << "Invalid HAVE message payload size: " << msg.payload.size() << std::endl;
+    return;
+  }
+  
+  // Payload is the 4-byte piece index in network byte order
+  uint32_t pieceIndex;
+  memcpy(&pieceIndex, msg.payload.data(), 4);
+  pieceIndex = ntohl(pieceIndex);
+
+  std::cout << "Received HAVE for piece " << pieceIndex << std::endl;
+  
+  // Update the peer's bitfield
+  peer.setHavePiece(pieceIndex);
+
+  // Check if this new piece makes us interested
+  checkAndSendInterested(peer);
+}
+
+void Client::handleBitfield(PeerConnection& peer, const PeerMessage& msg) {
+  std::cout << "Received BITFIELD (" << msg.payload.size() << " bytes)" << std::endl;
+  peer.bitfield_ = msg.payload;
+
+  // TODO: Add logic to compare our bitfield to the peer's.
+  // For now, let's just assume they have something we want
+  // and send an INTERESTED message.
+  if (!peer.amInterested_) {
+    checkAndSendInterested(peer);
+  }
+}
+
+/** 
+ * @brief Checks if we are interested in the peer and sends an
+ * Interested message (ID 2) if we aren't already.
+ * 
+ * We are interested if the peer has a piece we don't
+ */
+void Client::checkAndSendInterested(PeerConnection& peer) {
+  // If we are already interested, nothing to do
+  if (peer.amInterested_) {
+    return;
+  }
+
+  // Check if the peer has *any* piece that we *don't* have.
+  for (size_t i = 0; i < numPieces_; ++i) {
+    bool peerHas = peer.hasPiece(i);
+    
+    // Check our bit
+    size_t my_byte_index = i / 8;
+    uint8_t my_bit_index = 7 - (i % 8);
+    bool iHave = (myBitfield_[my_byte_index] & (1 << my_bit_index)) != 0;
+
+    if (peerHas && !iHave) {
+      std::cout << "Peer has piece " << i << " which we don't. Sending INTERESTED." << std::endl;
+      peer.sendInterested();
+      peer.amInterested_ = true;
+      return; // Found a piece, sent message, we're done.
+    }
+  }
+
+  std::cout << "Peer bitfield contains no pieces we need." << std::endl;
 }

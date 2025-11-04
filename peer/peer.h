@@ -55,6 +55,26 @@ public:
   void sendBitfield(const std::vector<uint8_t>& bitfield);
 
   /**
+   * @brief Sends an Interested message (ID 2).
+   */
+  void sendInterested();
+
+  /**
+   * @brief Sends a Request message (ID 6).
+   * 
+   * The length should be 2^14 (16384) byte according to
+   * https://wiki.theory.org/BitTorrentSpecification#Message_flow
+   * 
+   * And the max is 2^15 (32768) byte
+   * 
+   * @param pieceIndex The zero-based index of the piece.
+   * @param begin The zero-based byte offset within the piece.
+   * @param length The requested length of the block (e.g., 16384).
+   */
+  void sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length);
+
+
+  /**
    * @brief Reads a single peer message from the socket.
    *
    * This is a blocking call. It will read the 4-byte length prefix,
@@ -64,6 +84,40 @@ public:
    * @throws std::runtime_error on read failure.
    */
   PeerMessage readMessage();
+
+  /**
+   * @brief Updates the peer's bitfield to indicate they have a piece.
+   * @param pieceIndex The zero-based index of the piece.
+   */
+  void setHavePiece(uint32_t pieceIndex);
+
+  /**
+   * @brief Checks if the peer has a specific piece, based on their bitfield.
+   * @param pieceIndex The zero-based index of the piece.
+   * @return True if the peer has the piece, false otherwise.
+   */
+  bool hasPiece(uint32_t pieceIndex) const;
+
+  // --- Peer State Variables ---
+  // These variables store the state of this peer.
+  
+  // Proabably need more but the specifications say
+  // this should be enough even for more effecient algorithms
+  
+  /** @brief Bitfield of the peer */
+  std::vector<uint8_t> bitfield_;
+  
+  /** @brief Are we choking this peer? (i.e., not sending them data) */
+  bool amChoking_ = true;
+  
+  /** @brief Is this peer choking us? (i.e., not willing to send us data) */
+  bool peerChoking_ = true;
+  
+  /** @brief Are we interested in what this peer has? */
+  bool amInterested_ = false;
+  
+  /** @brief Is this peer interested in what we have? */
+  bool peerInterested_ = false;
 
 private:
   /**

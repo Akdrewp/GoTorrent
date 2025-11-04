@@ -59,6 +59,19 @@
     "stop_token": "cpp",
     "thread": "cpp",
     "cinttypes": "cpp",
-    "cstring": "cpp"
+    "cstring": "cpp",
+    "csignal": "cpp",
+    "charconv": "cpp",
+    "chrono": "cpp",
+    "codecvt": "cpp",
+    "complex": "cpp",
+    "coroutine": "cpp",
+    "list": "cpp",
+    "source_location": "cpp",
+    "format": "cpp",
+    "future": "cpp",
+    "shared_mutex": "cpp",
+    "span": "cpp",
+    "typeindex": "cpp"
   }
 }

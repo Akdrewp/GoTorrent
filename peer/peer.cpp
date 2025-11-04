@@ -122,16 +122,40 @@ std::vector<unsigned char> PeerConnection::performHandshake(
   return responsePeerId;
 }
 
-  /**
-   * @brief Constructs and sends a Bitfield message (ID=5) to the peer.
-   * @param bitfield The raw bytes of the bitfield.
-   * @throws std::runtime_error on send failure.
-   */
+/**
+ * @brief Constructs and sends a Bitfield message (ID=5) to the peer.
+ * @param bitfield The raw bytes of the bitfield.
+ * @throws std::runtime_error on send failure.
+ */
 void PeerConnection::sendBitfield(const std::vector<uint8_t>& bitfield) {
   // A bitfield message has ID = 5
   std::vector<unsigned char> payload(bitfield.begin(), bitfield.end());
   sendMessage(5, payload);
   std::cout << "Sent bitfield (" << payload.size() << " bytes) to " << ip_ << std::endl;
+}
+
+
+void PeerConnection::sendInterested() {
+  sendMessage(2, {}); // ID 2 = interested, no payload
+}
+
+void PeerConnection::sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length) {
+  std::cout << "Sending REQUEST for piece " << pieceIndex 
+            << " (begin: " << begin << ", length: " << length << ")" << std::endl;
+            
+  // Payload is 12 bytes: index, begin, length
+  std::vector<uint8_t> payload(12);
+  
+  // Convert to network byte order
+  uint32_t index_net = htonl(pieceIndex);
+  uint32_t begin_net = htonl(begin);
+  uint32_t length_net = htonl(length);
+  
+  memcpy(&payload[0], &index_net, 4);
+  memcpy(&payload[4], &begin_net, 4);
+  memcpy(&payload[8], &length_net, 4);
+  
+  sendMessage(6, payload); // ID 6 = request
 }
 
 /**
@@ -205,4 +229,41 @@ void PeerConnection::sendMessage(uint8_t id, const std::vector<unsigned char>& p
   } catch (const std::exception& e) {
     throw std::runtime_error("Failed to send message: " + std::string(e.what()));
   }
+}
+
+/**
+ * @brief Updates the peer's bitfield to indicate they have a piece.
+ * @param pieceIndex The zero-based index of the piece.
+ */
+void PeerConnection::setHavePiece(uint32_t pieceIndex) {
+  size_t byte_index = pieceIndex / 8;
+  uint8_t bit_index = 7 - (pieceIndex % 8); // 7 - ... because bits are 7..0
+
+  // Ensure the bitfield is large enough.
+  // This is crucial if we get a HAVE message before a BITFIELD message.
+  if (byte_index >= bitfield_.size()) {
+    bitfield_.resize(byte_index + 1, 0); // Resize and fill with 0s
+  }
+
+  // Set the bit
+  bitfield_[byte_index] |= (1 << bit_index);
+}
+
+/**
+ * @brief Checks if the peer has a specific piece, based on their bitfield.
+ * @param pieceIndex The zero-based index of the piece.
+ * @return True if the peer has the piece, false otherwise.
+ */
+bool PeerConnection::hasPiece(uint32_t pieceIndex) const {
+  //
+  size_t byte_index = pieceIndex / 8;
+  uint8_t bit_index = 7 - (pieceIndex % 8);
+
+  // If the piece index is out of bounds of their bitfield, they don't have it
+  if (byte_index >= bitfield_.size()) {
+    return false;
+  }
+
+  // Check if the bit is set
+  return (bitfield_[byte_index] & (1 << bit_index)) != 0;
 }
