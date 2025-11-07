@@ -47,7 +47,11 @@ public:
    */
   ~Client();
 
-private:
+private: 
+
+  /**
+   * @TODO Redo comments for multiple peers
+   */
   /**
    * @brief Loads torrent file, parses it, and generates our peer_id.
    */
@@ -72,6 +76,16 @@ private:
    * @brief Sends our bitfield and starts the main loop for peer messages.
    */
   void startMessageLoop();
+
+  /**
+   * @brief Makes decisions based on the current peer state.
+   */
+  void doAction(PeerConnection& peer);
+
+  /**
+   * @brief Finds and requests the next available piece/block.
+   */
+  void requestPiece(PeerConnection& peer);
 
   /**
    * @brief Main message router. Called by startMessageLoop.

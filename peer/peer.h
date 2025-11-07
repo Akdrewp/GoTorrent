@@ -4,6 +4,9 @@
 #include <boost/asio.hpp> // Main Asio header
 #include <string>
 #include <vector>
+#include <optional>
+#include <memory>
+
 
 // Use a convenience namespace
 namespace asio = boost::asio;

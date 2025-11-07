@@ -32,6 +32,7 @@ int main(int argc, char* argv[]) {
 
   // Clean up libcurl
   curl_global_cleanup();
+  std::cout << "\n--- RETURNING 0 MAIN FUNCTION END ---" << std::endl;
   return 0;
 }
 
