@@ -2,10 +2,12 @@
 #include <iostream>
 #include <stdexcept>
 #include <cstring> // For memcpy
+#include <openssl/sha.h>
 
-// Use a convenience namespace
-namespace asio = boost::asio;
-using asio::ip::tcp;
+// CONSTANTS
+
+// Standard block size
+static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
 
 PeerConnection::PeerConnection(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port)
   : ip_(std::move(peer_ip)),
@@ -159,51 +161,6 @@ void PeerConnection::sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t l
 }
 
 /**
- * @brief Reads a single peer message from the socket.
- *
- * This is a blocking call. It will read the 4-byte length prefix,
- * then read the full message payload (ID + data).
- *
- * @return A PeerMessage struct.
- * @throws std::runtime_error on read failure.
- */
-PeerMessage PeerConnection::readMessage() {
-  try {
-    // Read the 4-byte length prefix
-    uint32_t length_net;
-    size_t lenRead = asio::read(socket_, asio::buffer(&length_net, 4), asio::transfer_exactly(4));
-    if (lenRead != 4) {
-      throw std::runtime_error("Failed to read message length prefix.");
-    }
-
-    // Convert from network byte order to host byte order
-    uint32_t length = ntohl(length_net);
-
-    // This is a "keep-alive" message
-    if (length == 0) {
-      return { 0, {} }; // ID 0, empty payload
-    }
-
-    // Read the rest of the message (ID + payload)
-    std::vector<unsigned char> messageBuffer(length);
-    size_t msgRead = asio::read(socket_, asio::buffer(messageBuffer), asio::transfer_exactly(length));
-    if (msgRead != length) {
-      throw std::runtime_error("Failed to read full message payload.");
-    }
-
-    // Separate the ID and the Payload
-    PeerMessage msg;
-    msg.id = messageBuffer[0]; // First byte is the ID
-    msg.payload.assign(messageBuffer.begin() + 1, messageBuffer.end()); // Rest is payload
-
-    return msg;
-
-  } catch (const std::exception& e) {
-    throw std::runtime_error("Failed to read message: " + std::string(e.what()));
-  }
-}
-
-/**
  * @brief Sends a generic message to the peer.
  * Client doesn't use this, each message will have own function
  * Prepends the 4-byte length and 1-byte ID.
@@ -231,6 +188,395 @@ void PeerConnection::sendMessage(uint8_t id, const std::vector<unsigned char>& p
   }
 }
 
+  /**
+   * @brief Starts the asynchronous state machine of the peer
+   * Here for the public facing start function
+   * 
+   * Sets the requisite variables 
+   * 
+   * @param pieceLength The length of one piece in bytes.
+   * @param totalLength The total length of the torrent in bytes.
+   * @param numPieces The total number of pieces.
+   * @param myBitfield A pointer to the client's master bitfield.
+   */
+void PeerConnection::start(
+    long long pieceLength, 
+    long long totalLength, 
+    size_t numPieces, 
+    std::vector<uint8_t>* myBitfield,
+    std::string* pieceHashes
+) {
+  std::cout << "[" << ip_ << "] Starting message loop." << std::endl;
+  
+  // Store the torrent info
+  pieceLength_ = pieceLength;
+  totalLength_ = totalLength;
+  numPieces_ = numPieces;
+  myBitfield_ = myBitfield; // Store pointer to client's bitfield
+  pieceHashes_ = pieceHashes;
+
+  // Initialize for 4-byte length prefix
+  readHeaderBuffer_.resize(4);
+
+  // Start the async read loop
+  startAsyncRead();
+}
+
+// --- Async Read Loop ---
+
+/**
+ * @brief Begins the asyncronous read for the 4-byte message header
+ * 
+ * Calls handleReadHeader as the completion handler
+ */
+void PeerConnection::startAsyncRead() {
+  asio::async_read(socket_, asio::buffer(readHeaderBuffer_), asio::transfer_exactly(4),
+    [this](const boost::system::error_code& ec, size_t /*bytesTransferred*/) {
+      handleReadHeader(ec);
+    });
+}
+
+/**
+ * @brief Handles the 4-byte message header and checks that read has succeeded
+ * 
+ * Starts the aynchronous reading of the body
+ * 
+ * Enforces the 16KB max payload
+ * https://www.bittorrent.org/beps/bep_0003.html
+ * 
+ * @param ec Error code passed in by asio:async_read
+ * 
+ * Calls handleReadHeader as the completion handler
+ */
+void PeerConnection::handleReadHeader(const boost::system::error_code& ec) {
+  if (ec) {
+    std::cerr << "[" << ip_ << "] Error reading header: " << ec.message() << std::endl;
+    return; // Stop the loop
+  }
+
+  uint32_t msgLength_net;
+  memcpy(&msgLength_net, readHeaderBuffer_.data(), 4);
+  uint32_t msgLength = ntohl(msgLength_net);
+
+  if (msgLength == 0) {
+    // Keep-alive message
+    std::cout << "[" << ip_ << "] Received Keep-Alive" << std::endl;
+    // Just start the next read
+    startAsyncRead();
+  } else if (msgLength > 200000) { // Sanity check (e.g., > 1.5 * (16k block + headers))
+      std::cerr << "[" << ip_ << "] Error: Message length too large: " << msgLength << std::endl;
+      return; // Stop
+  } else {
+    // Resize the body buffer and start reading the body
+    readBodyBuffer_.resize(msgLength);
+    startAsyncReadBody(msgLength);
+  }
+}
+
+/**
+ * @brief Begins an asynchronous read for the message body (ID + payload).
+ * 
+ * Calls handleReadBody as the completion handler
+ * 
+ * @param msgLength The length of the body to read.
+ */
+void PeerConnection::startAsyncReadBody(uint32_t msgLength) {
+  asio::async_read(socket_, asio::buffer(readBodyBuffer_), asio::transfer_exactly(msgLength),
+    [this, msgLength](const boost::system::error_code& ec, size_t /*bytesTransferred*/) {
+      handleReadBody(msgLength, ec);
+    });
+}
+
+/**
+ * @brief Handles the message from the peer
+ * 
+ * Completion handler for startAsyncReadBody
+ * 
+ * Handles the message via state changing and action functions
+ * 
+ * @param ec Error code passed in by asio:async_read
+ * 
+ * Calls handleReadHeader as the completion handler
+ */
+void PeerConnection::handleReadBody(uint32_t msgLength, const boost::system::error_code& ec) {
+  if (ec) {
+    std::cerr << "[" << ip_ << "] Error reading body: " << ec.message() << std::endl;
+    return; // Stop the loop
+  }
+
+  PeerMessage msg;
+  msg.id = readBodyBuffer_[0]; // First byte is ID
+  msg.payload.assign(readBodyBuffer_.begin() + 1, readBodyBuffer_.end()); // Rest is payload
+
+  // Handle the message (Update state)
+  handleMessage(std::move(msg));
+
+  // Do an action (Make decisions)
+  doAction();
+
+  // Continue the loop
+  startAsyncRead();
+}
+
+/**
+ * @brief Main message router
+ * @param peer The peer that sent the message.
+ * @param msg The message received from the peer.
+ */
+void PeerConnection::handleMessage(PeerMessage msg) {
+  switch (msg.id) {
+    // choke: <len=0001><id=0>
+    case 0: handleChoke(); break;
+    
+    // unchoke: <len=0001><id=1>
+    case 1: handleUnchoke(); break;
+
+    // have: <len=0005><id=4><piece index>
+    case 4: handleHave(msg); break;
+
+    // bitfield: <len=0001+X><id=5><bitfield>
+    case 5: handleBitfield(msg); break;
+
+    // piece: <len=0009+X><id=7><index><begin><block>
+    case 7: handlePiece(msg); break;
+    default:
+      std::cout << "[" << ip_ << "] Received unhandled message. ID: " << (int)msg.id << std::endl;
+  }
+}
+
+// --- Message Actions (State Act) ---
+// This should be fleshed out more to emcompass
+// an entire state machine of a peer
+
+/**
+ * @brief Makes decisions based on the current peer state.
+ */
+void PeerConnection::doAction() {
+  // Action 1: Check if we should be interested in this peer.
+  checkAndSendInterested();
+
+  // Action 2: Check if we can and should request pieces (pipelining).
+  if (amInterested_ && !peerChoking_) {
+    // We are interested, and the peer is not choking us.
+    // Fill the request pipeline.
+    requestPiece();
+  }
+}
+
+/**
+ * @brief Fills the request pipeline using the "First Available" strategy.
+ *
+ * It finds the first piece the peer has that we don't,
+ * and then requests all blocks for that piece.
+ * 
+ * @todo Should be using "Rarest first" but that requires 
+ * coordinating nodes
+ */
+void PeerConnection::requestPiece() {
+
+  // If the bitfield has not been updated since last failed search
+  // We have searched through the pieces and not found any match
+  if (!bitfieldUpdated_) {
+    std::cout << "[" << ip_ << "] All pieces checked/downloaded, nothing to request." << std::endl;
+    return;
+  }
+
+  // Fill the pipeline up to MAX_PIPELINE_SIZE
+  while (inFlightRequests_.size() < MAX_PIPELINE_SIZE) {
+    
+    // If we're not working on a piece (offset is 0),
+    // we must find the next available piece to start.
+    if (nextBlockOffset_ == 0) {
+
+      bool foundPiece = false;
+      // Search bitfield to find a piece peer has but client doesn't
+      for (size_t i = 0; i < numPieces_; ++i) {
+        if (hasPiece(i) && !clientHasPiece(i)) {
+          // Found piece to request
+          nextPieceIndex_ = i;
+          foundPiece = true;
+          std::cout << "[" << ip_ << "] Found new piece to download: " << nextPieceIndex_ << std::endl;
+
+          // Calculate the true length of this piece
+          /**
+           * New length is size of piece 16KB
+           * 
+           * UNLESS
+           * 
+           * It's last piece in which it is
+           * totalLength_ - totalDownloaded
+           */
+          long long thisPieceLength = pieceLength_;
+          long long totalDownloaded = (long long)nextPieceIndex_ * pieceLength_;
+          if (totalDownloaded + thisPieceLength > totalLength_) {
+              thisPieceLength = totalLength_ - totalDownloaded;
+          }
+          currentPieceBuffer_.resize(thisPieceLength);
+          break;
+        }
+      }
+
+      // If we still haven't found a piece, this peer has nothing
+      // for us.
+      if (!foundPiece) {
+        // We've searched to the end and found nothing.
+        // We set bitfieldUpdated_ to false to not search again
+        bitfieldUpdated_ = false;
+        std::cout << "[" << ip_ << "] Peer has no pieces we need (from " 
+                  << nextPieceIndex_ << " onwards). Waiting." << std::endl;
+        return; // Exit request
+      }
+    }
+
+    // If we have requested all blocks for this piece
+    if (nextBlockOffset_ >= currentPieceBuffer_.size()) {
+      // Update bitfield searched flag
+      bitfieldUpdated_ = false;
+      return;
+    }
+
+    long long thisPieceLength = currentPieceBuffer_.size();
+    if (thisPieceLength == 0) {
+        // This can happen if we found a piece but failed to resize buffer
+        // Reset and attempt to request the first block
+        nextBlockOffset_ = 0;
+        return;
+    }
+
+    // If we're here, nextPieceIndex_ is set to a piece that
+    // the peer has and we don't.
+    
+    // Client have a piece to download
+    uint32_t blockLength = BLOCK_SIZE;
+    
+    // TODO: Need to handle the last piece/block, which might be shorter.
+    if (nextBlockOffset_ + BLOCK_SIZE > pieceLength_) {
+        blockLength = pieceLength_ - nextBlockOffset_;
+    }
+    
+    // Send the request
+    std::cout << "[" << ip_ << "] --- ACTION: Requesting piece " << nextPieceIndex_ 
+              << ", Block offset " << nextBlockOffset_ << " ---" << std::endl;
+              
+    sendRequest(
+        static_cast<uint32_t>(nextPieceIndex_), // pieceIndex
+        nextBlockOffset_,                      // begin
+        blockLength                            // length
+    );
+
+    // Add this to our in-flight list
+    inFlightRequests_.push_back(PendingRequest{
+        static_cast<uint32_t>(nextPieceIndex_),
+        nextBlockOffset_,
+        blockLength
+    });
+
+    // Advance to the next block
+    nextBlockOffset_ += blockLength;
+    
+  }
+}
+
+/**
+ * @brief Checks if we are interested in the peer and sends an
+ * Interested message (ID 2) if we aren't already.
+ */
+void PeerConnection::checkAndSendInterested() {
+  if (amInterested_) {
+    return; // Already interested
+  }
+
+  for (size_t i = 0; i < numPieces_; ++i) {
+    if (hasPiece(i) && !clientHasPiece(i)) {
+      std::cout << "[" << ip_ << "] Peer has piece " << i << " which we don't. Sending INTERESTED." << std::endl;
+      sendInterested();
+      amInterested_ = true;
+      return; 
+    }
+  }
+}
+
+
+// --- Message Handlers (State Updaters) ---
+
+/**
+ * @brief Handles a choke message from a peer
+ * 
+ * Updates the requests buffer to be empty
+ * AND
+ * Sets peerChoking_ to true
+ * 
+ * A choke message means a peer will not accept any messages from us.
+ * 
+ * Any existing messages should be considered to be discarded
+ */
+void PeerConnection::handleChoke() {
+  std::cout << "[" << ip_ << "] Received CHOKE" << std::endl;
+  peerChoking_ = true;
+
+  // If we had requests pending, they are now dead.
+  // A real client might re-queue these.
+  // For now, we just clear them.
+  if (!inFlightRequests_.empty()) {
+      std::cout << "  Peer choked us, clearing " << inFlightRequests_.size() << " in-flight requests." << std::endl;
+      inFlightRequests_.clear();
+      
+      // We must reset our download position to the start
+      // of the piece we were working on.
+      nextPieceIndex_ = inFlightRequests_[0].pieceIndex;
+      nextBlockOffset_ = inFlightRequests_[0].begin;
+  }
+}
+
+/**
+ * @brief Handles an unchoke message from a peer
+ * 
+ * Sets peerChoking_ to false
+ * 
+ * An unchoke message means a peer is ready to recieve messages
+ */
+void PeerConnection::handleUnchoke() {
+  std::cout << "[" << ip_ << "] Received UNCHOKE" << std::endl;
+  peerChoking_ = false;
+}
+
+/**
+ * @brief Handles a have message from a peer
+ * 
+ * Updates bitfield of peer
+ * 
+ * A have message means this peer has this signified piece
+ */
+void PeerConnection::handleHave(const PeerMessage& msg) {
+  if (msg.payload.size() != 4) {
+    std::cerr << "[" << ip_ << "] Invalid HAVE message payload size: " << msg.payload.size() << std::endl;
+    return;
+  }
+  
+  uint32_t pieceIndex;
+  memcpy(&pieceIndex, msg.payload.data(), 4);
+  pieceIndex = ntohl(pieceIndex);
+
+  std::cout << "[" << ip_ << "] Received HAVE for piece " << pieceIndex << std::endl;
+  
+  // Set piece in bitfield
+  setHavePiece(pieceIndex);
+}
+
+/**
+ * @brief Handles a have bitfield from a peer
+ * 
+ * Updates bitfield of peer
+ * 
+ * A have message means this peer has this signified piece
+ */
+void PeerConnection::handleBitfield(const PeerMessage& msg) {
+  std::cout << "[" << ip_ << "] Received BITFIELD (" << msg.payload.size() << " bytes)" << std::endl;
+  bitfield_ = msg.payload;
+  bitfieldUpdated_ = true;
+}
+
+
 /**
  * @brief Updates the peer's bitfield to indicate they have a piece.
  * @param pieceIndex The zero-based index of the piece.
@@ -247,6 +593,9 @@ void PeerConnection::setHavePiece(uint32_t pieceIndex) {
 
   // Set the bit
   bitfield_[byte_index] |= (1 << bit_index);
+
+  // Update bitfield search
+  bitfieldUpdated_ = true;
 }
 
 /**
@@ -266,4 +615,137 @@ bool PeerConnection::hasPiece(uint32_t pieceIndex) const {
 
   // Check if the bit is set
   return (bitfield_[byte_index] & (1 << bit_index)) != 0;
+}
+
+void PeerConnection::handlePiece(const PeerMessage& msg) {
+    if (msg.payload.size() < 8) {
+        std::cerr << "[" << ip_ << "] Invalid PIECE message payload size: " << msg.payload.size() << std::endl;
+        return;
+    }
+
+    // Copy data and convert to host byte order
+    uint32_t pieceIndex, begin;
+    memcpy(&pieceIndex, msg.payload.data(), 4);
+    memcpy(&begin, msg.payload.data() + 4, 4);
+    pieceIndex = ntohl(pieceIndex);
+    begin = ntohl(begin);
+    size_t blockLength = msg.payload.size() - 8;
+
+
+    std::cout << "[" << ip_ << "] Received PIECE: Index=" << pieceIndex 
+              << ", Begin=" << begin
+              << ", Length=" << blockLength << std::endl;
+
+    // Find this block from our in-flight list
+    // @todo change inFlightRequests to requestsBuffer
+    auto it = std::find_if(inFlightRequests_.begin(), inFlightRequests_.end(), 
+        [pieceIndex, begin, blockLength](const PendingRequest& req) {
+            return req.pieceIndex == pieceIndex && 
+                   req.begin == begin && 
+                   req.length == blockLength;
+        });
+
+    if (it != inFlightRequests_.end()) {
+      // Remove from buffer
+      inFlightRequests_.erase(it);
+
+      // Save the block data into our piece buffer
+      if (pieceIndex == nextPieceIndex_ && (begin + blockLength) <= currentPieceBuffer_.size()) {
+          const unsigned char* blockData = msg.payload.data() + 8;
+          memcpy(&currentPieceBuffer_[begin], blockData, blockLength);
+          std::cout << "  Saved " << blockLength << " bytes to piece buffer." << std::endl;
+      } else {
+          std::cout << "  WARNING: Received piece data for wrong piece/offset. Discarding." << std::endl;
+          return;
+      }
+
+      // Check if this piece is now complete
+      // (We are done if the pipeline for this piece is empty
+      // AND our offset is at the end)
+      bool pieceFinished = (nextBlockOffset_ >= currentPieceBuffer_.size());
+      
+      // Check if any other in-flight requests are for this piece
+      for (const auto& req : inFlightRequests_) {
+          if (req.pieceIndex == nextPieceIndex_) {
+              pieceFinished = false; // Still waiting for more blocks
+              break;
+          }
+      }
+
+      if (pieceFinished) {
+          std::cout << "  COMPLETED PIECE " << pieceIndex << " (all blocks received)!" << std::endl;
+          
+          // Verify hash
+          if (verifyPieceHash(pieceIndex)) {
+              std::cout << "  HASH OK for piece " << pieceIndex << "!" << std::endl;
+              
+              // Set client bitfield
+              size_t my_byte_index = pieceIndex / 8;
+              uint8_t my_bit_index = 7 - (pieceIndex % 8);
+              if (myBitfield_) {
+                  // @TODO: This should be thread-safe if we add multi-threading
+                  (*myBitfield_)[my_byte_index] |= (1 << my_bit_index);
+              }
+              
+              // @TODO: Write piece to file
+              
+              // Advance to next piece
+              nextBlockOffset_ = 0;
+              nextPieceIndex_++;
+              currentPieceBuffer_.clear();
+
+          } else {
+              std::cout << "  *** HASH FAILED for piece " << pieceIndex << " ***" << std::endl;
+              // Discard data and reset to re-download this piece
+              nextBlockOffset_ = 0;
+              // nextPieceIndex_ remains the same
+              currentPieceBuffer_.clear();
+          }
+        }
+
+    } else {
+        std::cout << "  WARNING: Received a PIECE that doesn't match any request." << std::endl;
+    }
+}
+
+
+// --- Helper Functions ---
+
+/**
+ * @brief Checks if *we* have a specific piece.
+ */
+bool PeerConnection::clientHasPiece(size_t pieceIndex) const {
+    if (!myBitfield_) return false; // Not initialized
+
+    size_t byte_index = pieceIndex / 8;
+    uint8_t bit_index = 7 - (pieceIndex % 8);
+
+    if (byte_index >= myBitfield_->size()) {
+        return false; // Should not happen if initialized
+    }
+    return ((*myBitfield_)[byte_index] & (1 << bit_index)) != 0;
+}
+
+/**
+ * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
+ */
+bool PeerConnection::verifyPieceHash(size_t pieceIndex) {
+    if (!pieceHashes_) {
+        std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, no hashes pointer." << std::endl;
+        return false;
+    }
+    if (currentPieceBuffer_.empty()) {
+        std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, piece buffer is empty." << std::endl;
+        return false;
+    }
+    
+    // Calculate the hash
+    unsigned char calculatedHash[SHA_DIGEST_LENGTH]; // 20 bytes
+    SHA1(currentPieceBuffer_.data(), currentPieceBuffer_.size(), calculatedHash);
+    
+    // Get the expected hash
+    const char* expectedHash = pieceHashes_->data() + (pieceIndex * 20);
+    
+    // Compare
+    return memcmp(calculatedHash, expectedHash, SHA_DIGEST_LENGTH) == 0;
 }

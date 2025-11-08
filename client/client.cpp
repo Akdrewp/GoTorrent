@@ -130,7 +130,18 @@ void Client::run() {
   loadTorrent();
   requestPeers();
   connectToPeers();
-  startMessageLoop();
+  
+  // Run the Asio event loop, processing all async operations.
+  // This blocks until all work is finished.
+  // (Which should never happen since 
+  // it calls async reads constantly.)
+  std::cout << "\n--- STARTING ASIO EVENT LOOP ---" << std::endl;
+  try {
+    io_context_.run();
+  } catch (const std::exception& e) {
+    std::cerr << "Event loop error: " << e.what() << std::endl;
+  }
+  std::cout << "--- ASIO EVENT LOOP ENDED ---" << std::endl;
 }
 
 void Client::loadTorrent() {
@@ -140,7 +151,7 @@ void Client::loadTorrent() {
   // Generate a peer_id
   peerId_ = generatePeerId();
 
-    // Calculate our bitfield size
+  // Calculate our bitfield size
   auto& infoVal = torrent_.mainData.at("info")->value;
   auto* infoDict = std::get_if<BencodeDict>(&infoVal);
   if (!infoDict) throw std::runtime_error("Invalid info dictionary.");
@@ -149,9 +160,22 @@ void Client::loadTorrent() {
   auto* piecesStr = std::get_if<std::string>(&piecesVal);
   if (!piecesStr) throw std::runtime_error("Invalid 'pieces' string.");
 
+  // Store the pieces hashes
+  pieceHashes_ = *piecesStr;
+
   // Each piece has a hash in "pieces" each with length 20
   // Amount of pieces is length of "pieces" / 20
   numPieces_ = piecesStr->length() / 20;
+
+  auto& pieceLenVal = infoDict->at("piece length")->value;
+  if (auto* len = std::get_if<long long>(&pieceLenVal)) {
+      pieceLength_ = *len;
+  } else {
+      throw std::runtime_error("Invalid 'piece length'.");
+  }
+  totalLength_ = getTotalLength(*infoDict); 
+  std::cout << "Torrent piece length: " << pieceLength_ << std::endl;
+  std::cout << "Torrent total length: " << totalLength_ << std::endl;
 
   // Each bit in the bitfield corresponds to a piece being recieved
   //
@@ -256,272 +280,48 @@ void Client::connectToPeers() {
     return;
   }
 
-  std::cout << "\n--- CONNECTING TO PEER ---" << std::endl;
-  // Let's try to connect to the first peer in the list
-  const auto& firstPeer = peers_[0];
-  try {
-    // Create the connection object
-    peerConn_ = std::make_unique<PeerConnection>(io_context_, firstPeer.ip, firstPeer.port);
+  std::cout << "\n--- CONNECTING TO PEERS ---" << std::endl;
 
-    // Attempt to connect
-    peerConn_->connect();
+  // Try to connect to every peer
+  for (const auto& peer : peers_) {
+    try {
+      // Create the connection object
+      auto peerConn = std::make_shared<PeerConnection>(io_context_, peer.ip, peer.port);
 
-    // Attempt to handshake
-    std::vector<unsigned char> peerResponseId = peerConn_->performHandshake(
-      torrent_.infoHash,
-      peerId_
-    );
-
-    std::cout << "Received peer ID: ";
-    for (unsigned char c : peerResponseId) {
-      if (std::isprint(c)) std::cout << c;
-      else std::cout << '.';
-    }
-    std::cout << std::endl;
-
-  } catch (const std::exception& e) {
-    std::cerr << "Peer connection failed: " << e.what() << std::endl;
-  }
-}
-
-void Client::startMessageLoop() {
-  if (!peerConn_) {
-    std::cout << "\nNo active peer connection. Skipping message loop." << std::endl;
-    return;
-  }
-
-  std::cout << "\n--- STARTING MESSAGE LOOP ---" << std::endl;
-  try {
-
-    // Starting connection
-    peerConn_->sendBitfield(myBitfield_);
-
-    // Read incoming message response
-    std::cout << "Waiting for peer messages..." << std::endl;
-
-    /**
-     * Main loop
-     * 
-     * Read Message
-     * 
-     * Update state based of message
-     * 
-     * Act on updated state
-     * 
-     * @todo
-     * Currently this still does wait for a message before
-     * doing an action
-     */
-    while (true) {
-      // Read a message (blocking)
-      PeerMessage msg = peerConn_->readMessage();
-
-      // Handle the message (update state)
-      handleMessage(*peerConn_, msg);
-
-      // Do an action (make decisions based on new state)
-      doAction(*peerConn_);
-    }
-
-  } catch (const std::exception& e) {
-    std::cerr << "Message loop failed: " << e.what() << std::endl;
-    peerConn_ = nullptr; // Connection failed, reset
-  }
-}
-
-/**
- * @brief Main message router
- * @param peer The peer that sent the message.
- * @param msg The message received from the peer.
- */
-void Client::handleMessage(PeerConnection& peer, const PeerMessage& msg) {
-  switch (msg.id) {
-    case 0: // choke
-      handleChoke(peer);
-      break;
-    case 1: // unchoke
-      handleUnchoke(peer);
-      break;
-    case 4: // have
-      handleHave(peer, msg);
-      break;
-    case 5: // bitfield
-      handleBitfield(peer, msg);
-      break;
-    case 7: // piece
-      // TODO: Implement handlePiece
-      std::cout << "Received PIECE (TODO: Handle this)" << std::endl;
-      break;
-    default:
-      std::cout << "Received unhandled message. ID: " << (int)msg.id << std::endl;
-  }
-}
-
-/**
- * --- State Handlers ---
- * 
- * Should deal with a state and do the corresponding action
- * 
- * Possible to change state as well
- * 
- * @TODO
- * Should be using buffers to queue messages
- */
-
-/**
- * @brief Makes decisions based on the current peer state.
- * This is the "brain" of the client's interaction.
- */
-void Client::doAction(PeerConnection& peer) {
-
-  // Action 1: Check if we should be interested in this peer.
-  checkAndSendInterested(peer);
-
-  // Action 2: Check if we can and should request a piece.
-  if (peer.amInterested_ && !peer.peerChoking_) {
-    // We are interested, and the peer is not choking us
-    // request a piece.
-    requestPiece(peer);
-  }
-}
-
-/**
- * @brief Finds and requests the next available piece/block.
- * * TODO: This is a simple placeholder. A real client needs
- * to manage piece/block state (e.g., what's requested,
- * what's in-flight, what's completed).
- */
-void Client::requestPiece(PeerConnection& peer) {
-  // TODO: Reqrite currently
-  // re-requests the same piece every loop.
-  // Maybe have a buffer for the peer of requests sent.
-
-  // Also requests sent before being choked should be void
-
-
-  // Check if a peer has a piece we don't have
-  // If interested and not choking then request
-  for (size_t i = 0; i < numPieces_; ++i) {
-    bool peerHas = peer.hasPiece(i);
-    
-    // Check our bit
-    size_t my_byte_index = i / 8;
-    uint8_t my_bit_index = 7 - (i % 8);
-    bool clientHas = (myBitfield_[my_byte_index] & (1 << my_bit_index)) != 0;
-
-    if (peerHas && !clientHas) {
-      // Found a piece we want
-      // TODO: Use buffer this requests already requested pieces ):
-      // For now, let's just request the first block (16KB)
-      // of this piece and then stop.
+      std::cout << "Connecting to " << peer.ip << ":" << peer.port << std::endl;
       
+      // Attempt to connect
+      // This throws error on failure
+      peerConn->connect();
 
-      std::cout << "--- ACTION: Requesting piece " << i << " ---" << std::endl;
-
-      // TODO: Get piece length and handle multiple blocks.
-      // For now, just request the first block.
-      peer.sendRequest(
-        static_cast<uint32_t>(i), // pieceIndex
-        0,                        // begin
-        BLOCK_SIZE                // length
+      // Attempt to handshake
+      // This throws error on failure
+      std::vector<unsigned char> peerResponseId = peerConn->performHandshake(
+        torrent_.infoHash,
+        peerId_
       );
 
-      // Explicit return for now stop stack smashing?
-      return;
-    }
-  }
-}
+      std::cout << "  Handshake successful with " << peer.ip << ". Peer ID: ";
+      for (unsigned char c : peerResponseId) {
+        if (std::isprint(c)) std::cout << c;
+        else std::cout << '.';
+      }
+      std::cout << std::endl;
 
+      // Send bitfield
+      peerConn->sendBitfield(myBitfield_);
 
-/** 
- * --- Message Handlers ---
- *  
- * State Updaters
- * 
- * Should only update state
- * 
- * What's done with the state after handling a message
- * should be handled by doAction (name tentattive)
- */
+      // Start asyncronous message loop 
+      peerConn->start(pieceLength_, totalLength_, numPieces_, &myBitfield_, &pieceHashes_);
 
-void Client::handleChoke(PeerConnection& peer) {
-  std::cout << "Received CHOKE" << std::endl;
-  peer.peerChoking_ = true;
-}
+      // Add to list of active connections
+      peerConnections_.push_back(std::move(peerConn));
 
-void Client::handleUnchoke(PeerConnection& peer) {
-  std::cout << "Received UNCHOKE" << std::endl;
-  peer.peerChoking_ = false;
-
-  // The peer is no longer choking us. If we are interested,
-  // we should start sending piece requests.
-  if (peer.amInterested_) {
-    std::cout << "Peer unchoked us and we are interested. Time to request pieces!" << std::endl;
-    // TODO: Add logic to pick a piece and send a request
-    // peer.sendRequest(...);
-  }
-}
-
-void Client::handleHave(PeerConnection& peer, const PeerMessage& msg) {
-  if (msg.payload.size() != 4) {
-    std::cerr << "Invalid HAVE message payload size: " << msg.payload.size() << std::endl;
-    return;
-  }
-  
-  // Payload is the 4-byte piece index in network byte order
-  uint32_t pieceIndex;
-  memcpy(&pieceIndex, msg.payload.data(), 4);
-  pieceIndex = ntohl(pieceIndex);
-
-  std::cout << "Received HAVE for piece " << pieceIndex << std::endl;
-  
-  // Update the peer's bitfield
-  peer.setHavePiece(pieceIndex);
-
-  // Check if this new piece makes us interested
-  checkAndSendInterested(peer);
-}
-
-void Client::handleBitfield(PeerConnection& peer, const PeerMessage& msg) {
-  std::cout << "Received BITFIELD (" << msg.payload.size() << " bytes)" << std::endl;
-  peer.bitfield_ = msg.payload;
-
-  // TODO: Add logic to compare our bitfield to the peer's.
-  // For now, let's just assume they have something we want
-  // and send an INTERESTED message.
-  if (!peer.amInterested_) {
-    checkAndSendInterested(peer);
-  }
-}
-
-/** 
- * @brief Checks if we are interested in the peer and sends an
- * Interested message (ID 2) if we aren't already.
- * 
- * We are interested if the peer has a piece we don't
- */
-void Client::checkAndSendInterested(PeerConnection& peer) {
-  // If we are already interested, nothing to do
-  if (peer.amInterested_) {
-    return;
-  }
-
-  // Check if the peer has *any* piece that we *don't* have.
-  for (size_t i = 0; i < numPieces_; ++i) {
-    bool peerHas = peer.hasPiece(i);
-    
-    // Check our bit
-    size_t my_byte_index = i / 8;
-    uint8_t my_bit_index = 7 - (i % 8);
-    bool iHave = (myBitfield_[my_byte_index] & (1 << my_bit_index)) != 0;
-
-    if (peerHas && !iHave) {
-      std::cout << "Peer has piece " << i << " which we don't. Sending INTERESTED." << std::endl;
-      peer.sendInterested();
-      peer.amInterested_ = true;
-      return; // Found a piece, sent message, we're done.
+    } catch (const std::exception& e) {
+      // If one peer fails, just print an error and continue with the next one
+      std::cerr << "  Failed to connect to peer " << peer.ip << ": " << e.what() << std::endl;
     }
   }
 
-  std::cout << "Peer bitfield contains no pieces we need." << std::endl;
+  std::cout << "--- CONNECTED TO " << peerConnections_.size() << " PEERS ---" << std::endl;
 }

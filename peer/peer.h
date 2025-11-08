@@ -21,6 +21,15 @@ struct PeerMessage {
 };
 
 /**
+ * @brief Holds info about a block request we are waiting for.
+ */
+struct PendingRequest {
+    uint32_t pieceIndex;
+    uint32_t begin;
+    uint32_t length;
+};
+
+/**
  * @brief Manages a single TCP connection to a BitTorrent peer.
  */
 class PeerConnection {
@@ -68,25 +77,31 @@ public:
    * The length should be 2^14 (16384) byte according to
    * https://wiki.theory.org/BitTorrentSpecification#Message_flow
    * 
-   * And the max is 2^15 (32768) byte
-   * 
    * @param pieceIndex The zero-based index of the piece.
    * @param begin The zero-based byte offset within the piece.
    * @param length The requested length of the block (e.g., 16384).
    */
   void sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length);
 
-
   /**
-   * @brief Reads a single peer message from the socket.
-   *
-   * This is a blocking call. It will read the 4-byte length prefix,
-   * then read the full message payload (ID + data).
-   *
-   * @return A PeerMessage struct.
-   * @throws std::runtime_error on read failure.
+   * @brief Starts the asynchronous state machine of the peer
+   * Here for the public facing start function
+   * 
+   * Sets the requisite variables 
+   * 
+   * @param pieceLength The length of one piece in bytes.
+   * @param totalLength The total length of the torrent in bytes.
+   * @param numPieces The total number of pieces.
+   * @param myBitfield A pointer to the client's master bitfield.
+   * @param pieceHashes A pointer to the client's raw piece hashes string.
    */
-  PeerMessage readMessage();
+  void start(
+      long long pieceLength, 
+      long long totalLength, 
+      size_t numPieces, 
+      std::vector<uint8_t>* myBitfield,
+      std::string* pieceHashes
+  );
 
   /**
    * @brief Updates the peer's bitfield to indicate they have a piece.
@@ -123,6 +138,111 @@ public:
   bool peerInterested_ = false;
 
 private:
+
+  // --- Async Read Loop ---
+
+  /**
+   * @brief Begins the asyncronous read for the 4-byte message header
+   * 
+   * Calls handleReadHeader as the completion handler
+   */
+  void startAsyncRead();
+
+  /**
+   * @brief Begins an asynchronous read for the message body (ID + payload).
+   * 
+   * Calls handleReadBody as the completion handler
+   * 
+   * @param msgLength The length of the body to read.
+   */
+  void startAsyncReadBody(uint32_t msgLength);
+
+  /**
+   * @brief Handles the 4-byte message header and checks that read has succeeded
+   * 
+   * Starts the aynchronous reading of the body
+   * 
+   * Enforces the 16KB max payload
+   * https://www.bittorrent.org/beps/bep_0003.html
+   * 
+   * @param ec Error code passed in by asio:async_read
+   * 
+   * Calls handleReadHeader as the completion handler
+   */
+  void handleReadHeader(const boost::system::error_code& ec);
+
+  /**
+   * @brief Handles the message from the peer
+   * 
+   * Completion handler for startAsyncReadBody
+   * 
+   * Handles the message via state changing and action functions
+   * 
+   * @param ec Error code passed in by asio:async_read
+   * 
+   * Calls handleReadHeader as the completion handler
+   */
+  void handleReadBody(uint32_t msgLength, const boost::system::error_code& ec);
+
+  // --- Message Handlers (State Changers) ---
+
+  /**
+   * @brief Main message router
+   * @param peer The peer that sent the message.
+   * @param msg The message received from the peer.
+   */
+  void handleMessage(PeerMessage msg);
+
+  /** 
+   * @brief Handles a Choke message (ID 0) 
+   */
+  void handleChoke();
+  /** 
+   * @brief Handles an Unchoke message (ID 1)
+   */
+  void handleUnchoke();
+  /** 
+   * @brief Handles a Have message (ID 4) 
+   */
+  void handleHave(const PeerMessage& msg);
+  /** 
+   * @brief Handles a Bitfield message (ID 5) 
+   */
+  void handleBitfield( const PeerMessage& msg);
+  /** 
+   * @brief Handles a Piece message (ID 7) 
+   */
+  void handlePiece(const PeerMessage& msg);
+
+  // --- State Actions (Handles Actions Dependent on State) ---
+
+  /**
+   * @brief Sends requests for pieces not haven to a peer
+   * 
+   * Only requests if the buffer is not full
+   * AND
+   * Peer has piece client wants
+   * 
+   * Otherwise fills up the buffer to the max
+   */
+  void requestPiece();
+
+  void doAction();
+
+  /** 
+   * @brief Checks if we are interested in the peer and sends an
+   * Interested message (ID 2) if we aren't already.
+   * 
+   * We are interested if the peer has a piece we don't
+   */
+  void checkAndSendInterested();
+
+  // --- Helper Functions ---
+
+  
+  bool clientHasPiece(size_t pieceIndex) const;
+  bool verifyPieceHash(size_t pieceIndex);
+
   /**
    * @brief Sends a generic message to the peer.
    * Client doesn't use this, each message will have own function
@@ -130,9 +250,31 @@ private:
    */
   void sendMessage(uint8_t id, const std::vector<unsigned char>& payload);
 
+  // --- Download State ---
+  std::vector<PendingRequest> inFlightRequests_;
+  static const int MAX_PIPELINE_SIZE = 5;
+  
+  size_t nextPieceIndex_ = 0;
+  uint32_t nextBlockOffset_ = 0;
+  std::vector<uint8_t> currentPieceBuffer_;
+  // Whether or not the bitfield has been updated since last action
+  bool bitfieldUpdated_;
+
+  // --- Torrent Info (passed from Client) ---
+  long long pieceLength_ = 0;
+  long long totalLength_ = 0;
+  size_t numPieces_ = 0;
+  std::vector<uint8_t>* myBitfield_; // Pointer to client's bitfield
+  std::string* pieceHashes_;    // Pointer to client's hashes
+
+  // --- Asio Variables ---
   std::string ip_;
   std::string port_str_;
   tcp::socket socket_; // The socket for this connection
+
+  // Buffers for async reading
+  std::vector<uint8_t> readHeaderBuffer_; // 4-byte length prefix
+  std::vector<uint8_t> readBodyBuffer_;   // For message ID + payload
 };
 
 #endif // PEER_H

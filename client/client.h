@@ -6,6 +6,8 @@
 #include <boost/asio.hpp>
 #include <string>
 #include <vector>
+#include <optional>
+#include <memory>
 
 namespace asio = boost::asio;
 
@@ -67,61 +69,14 @@ private:
    */
   void connectToPeers();
 
-  /**
-   * @brief Sends bitfields to connected peer.
-   */
-  void sendBitfieldToPeer();
+  // --- Torrent Info ---
+  long long pieceLength_ = 0;
+  long long totalLength_ = 0;
+  size_t numPieces_ = 0;
+  std::vector<uint8_t> myBitfield_; // Client bitfield
+  std::string pieceHashes_;         // Raw 20-byte SHA1 hashes
 
-  /**
-   * @brief Sends our bitfield and starts the main loop for peer messages.
-   */
-  void startMessageLoop();
-
-  /**
-   * @brief Makes decisions based on the current peer state.
-   */
-  void doAction(PeerConnection& peer);
-
-  /**
-   * @brief Finds and requests the next available piece/block.
-   */
-  void requestPiece(PeerConnection& peer);
-
-  /**
-   * @brief Main message router. Called by startMessageLoop.
-   * @param peer The peer that sent the message.
-   * @param msg The message received from the peer.
-   */
-  void handleMessage(PeerConnection& peer, const PeerMessage& msg);
-
-  // --- Message Handlers ---
-
-  /** 
-   * @brief Handles a Choke message (ID 0) 
-  */
-  void handleChoke(PeerConnection& peer);
-  /** 
-   * @brief Handles an Unchoke message (ID 1)
-  */
-  void handleUnchoke(PeerConnection& peer);
-  /** 
-   * @brief Handles a Have message (ID 4) 
-  */
-  void handleHave(PeerConnection& peer, const PeerMessage& msg);
-  /** 
-   * @brief Handles a Bitfield message (ID 5) 
-  */
-  void handleBitfield(PeerConnection& peer, const PeerMessage& msg);
-
-  /** 
-   * @brief Checks if we are interested in the peer and sends an
-   * Interested message (ID 2) if we aren't already.
-   * 
-   * We are interested if the peer has a piece we don't
-   */
-  void checkAndSendInterested(PeerConnection& peer);
-
-  // Member variables
+  // --- External Variables ---
   asio::io_context& io_context_;
   std::string torrentFilePath_;
   
@@ -129,13 +84,11 @@ private:
   std::string peerId_;
   std::vector<Peer> peers_;
   long long port_;
-  // Stores our active connection
-  // This is only one connection at a time for now.
-  // Later on convert to vector or combine with peers_
-  std::unique_ptr<PeerConnection> peerConn_;
 
-  size_t numPieces_ = 0;
-  std::vector<uint8_t> myBitfield_; // What pieces we have
+  // Stores the peer connections
+  // @TODO combine Peer and PeerConnection Object?
+  // Stores a vector of pointers to each connection
+  std::vector<std::shared_ptr<PeerConnection>> peerConnections_;
 };
 
 #endif // CLIENT_H
