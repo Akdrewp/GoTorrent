@@ -143,6 +143,7 @@ std::string buildTrackerUrl(
   ss << "&downloaded=" << downloaded;
   ss << "&left="       << left;
   ss << "&compact=" << compact;
+  ss << "&numwant=" << 50; // Hardcode 50 peers
   
   // Add the event=started for the first request
   ss << "&event=started";

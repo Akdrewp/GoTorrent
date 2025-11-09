@@ -4,12 +4,14 @@
 #include "torrent.h" // For TorrentData
 #include "tracker.h" // For Peer
 #include <boost/asio.hpp>
+#include <boost/asio/ip/tcp.hpp> // For tcp::acceptor
 #include <string>
 #include <vector>
 #include <optional>
 #include <memory>
 
 namespace asio = boost::asio;
+using asio::ip::tcp;
 
 // Forward declrationg defined in peer.h
 class PeerConnection;
@@ -69,6 +71,19 @@ private:
    */
   void connectToPeers();
 
+  /**
+   * @brief Starts the TCP acceptor to listen for new peers (Inbound).
+   */
+  void startAccepting();
+
+  /**
+   * @brief Callback function to handle a new inbound peer connection.
+   * @param ec An error code from the accept operation.
+   * @param socket The new socket for the connected peer.
+   */
+  void handleAccept(const boost::system::error_code& ec, tcp::socket socket);
+
+
   // --- Torrent Info ---
   long long pieceLength_ = 0;
   long long totalLength_ = 0;
@@ -81,9 +96,13 @@ private:
   std::string torrentFilePath_;
   
   TorrentData torrent_;
+
+  // --- Server Variables ---
   std::string peerId_;
   std::vector<Peer> peers_;
   long long port_;
+
+  tcp::acceptor acceptor_;
 
   // Stores the peer connections
   // @TODO combine Peer and PeerConnection Object?

@@ -9,7 +9,7 @@
       "program": "${workspaceFolder}/bittorrent_client",
       "args": [
         // Add a default torrent file to debug with
-        "${workspaceFolder}/ubuntu-25.10-desktop-amd64.iso.torrent"
+        "${workspaceFolder}/LibreOffice_25.8.2_Win_x86-64.msi.torrent"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",

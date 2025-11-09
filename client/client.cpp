@@ -117,7 +117,8 @@ static std::string generatePeerId() {
 Client::Client(asio::io_context& io_context, std::string torrentFilePath)
   : io_context_(io_context),
     torrentFilePath_(std::move(torrentFilePath)),
-    port_(6881) // Hardcode port for now
+    port_(6882), // Hardcode port for now
+    acceptor_(io_context, tcp::endpoint(tcp::v4(), port_)) // Initialize the acceptor
 {
 }
 
@@ -130,6 +131,7 @@ void Client::run() {
   loadTorrent();
   requestPeers();
   connectToPeers();
+  startAccepting(); // Start listening for inbound connections
   
   // Run the Asio event loop, processing all async operations.
   // This blocks until all work is finished.
@@ -289,33 +291,19 @@ void Client::connectToPeers() {
       auto peerConn = std::make_shared<PeerConnection>(io_context_, peer.ip, peer.port);
 
       std::cout << "Connecting to " << peer.ip << ":" << peer.port << std::endl;
-      
-      // Attempt to connect
-      // This throws error on failure
-      peerConn->connect();
 
-      // Attempt to handshake
-      // This throws error on failure
-      std::vector<unsigned char> peerResponseId = peerConn->performHandshake(
-        torrent_.infoHash,
-        peerId_
+      peerConn->startAsOutbound(
+          torrent_.infoHash,
+          peerId_,
+          pieceLength_,
+          totalLength_,
+          numPieces_,
+          &myBitfield_,
+          &pieceHashes_
       );
 
-      std::cout << "  Handshake successful with " << peer.ip << ". Peer ID: ";
-      for (unsigned char c : peerResponseId) {
-        if (std::isprint(c)) std::cout << c;
-        else std::cout << '.';
-      }
-      std::cout << std::endl;
-
-      // Send bitfield
-      peerConn->sendBitfield(myBitfield_);
-
-      // Start asyncronous message loop 
-      peerConn->start(pieceLength_, totalLength_, numPieces_, &myBitfield_, &pieceHashes_);
-
-      // Add to list of active connections
-      peerConnections_.push_back(std::move(peerConn));
+      // Add peer to peer lists
+      peerConnections_.push_back(peerConn);
 
     } catch (const std::exception& e) {
       // If one peer fails, just print an error and continue with the next one
@@ -324,4 +312,55 @@ void Client::connectToPeers() {
   }
 
   std::cout << "--- CONNECTED TO " << peerConnections_.size() << " PEERS ---" << std::endl;
+}
+
+/**
+ * @brief Starts the TCP acceptor to listen for new peers (Inbound).
+ */
+void Client::startAccepting() {
+  std::cout << "Waiting for inbound connections..." << std::endl;
+  
+  // Start an asynchronous accept operation.
+  // Completion handler is handleAccept
+  acceptor_.async_accept(
+    [this](const boost::system::error_code& ec, tcp::socket socket) {
+      handleAccept(ec, std::move(socket));
+    }
+  );
+}
+
+/**
+ * @brief Callback function to handle a new inbound peer connection.
+ */
+void Client::handleAccept(const boost::system::error_code& ec, tcp::socket socket) {
+  if (!ec) {
+    std::cout << "\n--- INBOUND CONNECTION from " 
+              << socket.remote_endpoint().address().to_string() 
+              << " ---" << std::endl;
+              
+    // Create a PeerConnection object from the existing socket
+    auto peerConn = std::make_shared<PeerConnection>(io_context_, std::move(socket));
+
+    // Start the inbound connection process
+    // This will wait for the peer's handshake, then reply
+    peerConn->startAsInbound(
+          torrent_.infoHash,
+          peerId_,
+          pieceLength_,
+          totalLength_,
+          numPieces_,
+          &myBitfield_,
+          &pieceHashes_
+    );
+
+    // Add peer to peer lists
+    peerConnections_.push_back(peerConn);
+
+  } else {
+    // An error occurred
+    std::cerr << "Acceptor error: " << ec.message() << std::endl;
+  }
+
+  // Listen for the next connection, regardless of what happened
+  startAccepting();
 }

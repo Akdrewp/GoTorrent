@@ -32,15 +32,59 @@ struct PendingRequest {
 /**
  * @brief Manages a single TCP connection to a BitTorrent peer.
  */
-class PeerConnection {
+class PeerConnection : public std::enable_shared_from_this<PeerConnection> {
 public:
+
   /**
-   * @brief Constructs a peer connection.
+   * @brief Constructs a peer connection from ip and port
+   * 
+   * This is for OUTBOUND connections (From a peer list)
+   * 
    * @param io_context The single, shared Asio io_context.
    * @param peer_ip The IP address of the peer to connect to.
    * @param peer_port The port of the peer to connect to.
    */
   PeerConnection(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port);
+
+  /**
+   * @brief Constructor a peer connection from an existing socket
+   * 
+   * This is for INBOUND connections
+   * 
+   * @param io_context The single, shared Asio io_context.
+   * @param socket An already-connected socket from a tcp::acceptor.
+   */
+  PeerConnection(asio::io_context& io_context, tcp::socket socket);
+
+  /**
+   * @brief Starts the connection process for an OUTBOUND connection.
+   *
+   * This will connect, handshake, send bitfield, and start the message loop.
+   */
+  void startAsOutbound(
+    const std::vector<unsigned char>& infoHash,
+    const std::string& peerId,
+    long long pieceLength, 
+    long long totalLength, 
+    size_t numPieces, 
+    std::vector<uint8_t>* myBitfield,
+    std::string* pieceHashes
+  );
+
+  /**
+   * @brief Starts the connection process for an INBOUND connection.
+   *
+   * This will receive a handshake, reply, send bitfield, and start the message loop.
+   */
+  void startAsInbound(
+    const std::vector<unsigned char>& infoHash,
+    const std::string& peerId,
+    long long pieceLength, 
+    long long totalLength, 
+    size_t numPieces, 
+    std::vector<uint8_t>* myBitfield,
+    std::string* pieceHashes
+  );
 
   /**
    * @brief Attempts to synchronously connect to the peer.
@@ -54,10 +98,7 @@ public:
    * @param peerId Our 20-byte peer_id.
    * @return The 20-byte peer_id from the other client, or an empty vector on failure.
    */
-  std::vector<unsigned char> performHandshake(
-    const std::vector<unsigned char>& infoHash,
-    const std::string& peerId
-  );
+  std::vector<unsigned char> performHandshake();
 
   /**
    * @brief Constructs and sends a Bitfield message (ID=5) to the peer.
@@ -82,26 +123,6 @@ public:
    * @param length The requested length of the block (e.g., 16384).
    */
   void sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length);
-
-  /**
-   * @brief Starts the asynchronous state machine of the peer
-   * Here for the public facing start function
-   * 
-   * Sets the requisite variables 
-   * 
-   * @param pieceLength The length of one piece in bytes.
-   * @param totalLength The total length of the torrent in bytes.
-   * @param numPieces The total number of pieces.
-   * @param myBitfield A pointer to the client's master bitfield.
-   * @param pieceHashes A pointer to the client's raw piece hashes string.
-   */
-  void start(
-      long long pieceLength, 
-      long long totalLength, 
-      size_t numPieces, 
-      std::vector<uint8_t>* myBitfield,
-      std::string* pieceHashes
-  );
 
   /**
    * @brief Updates the peer's bitfield to indicate they have a piece.
@@ -138,6 +159,15 @@ public:
   bool peerInterested_ = false;
 
 private:
+
+    // --- Inbound Handshake Logic ---
+  void asyncReadInboundHandshake();
+  void handleReadInboundHandshake(const boost::system::error_code& ec, size_t bytesTransferred);
+  void asyncWriteInboundHandshake();
+  void handleWriteInboundHandshake(const boost::system::error_code& ec, size_t bytesTransferred);
+  void asyncWriteInboundBitfield();
+  void handleWriteInboundBitfield(const boost::system::error_code& ec, size_t bytesTransferred);
+
 
   // --- Async Read Loop ---
 
@@ -238,7 +268,6 @@ private:
   void checkAndSendInterested();
 
   // --- Helper Functions ---
-
   
   bool clientHasPiece(size_t pieceIndex) const;
   bool verifyPieceHash(size_t pieceIndex);
@@ -266,6 +295,8 @@ private:
   size_t numPieces_ = 0;
   std::vector<uint8_t>* myBitfield_; // Pointer to client's bitfield
   std::string* pieceHashes_;    // Pointer to client's hashes
+  std::vector<unsigned char> infoHash_; 
+  std::string peerId_;
 
   // --- Asio Variables ---
   std::string ip_;
@@ -275,6 +306,7 @@ private:
   // Buffers for async reading
   std::vector<uint8_t> readHeaderBuffer_; // 4-byte length prefix
   std::vector<uint8_t> readBodyBuffer_;   // For message ID + payload
+  std::vector<uint8_t> handshakeBuffer_;  // 68 bytes
 };
 
 #endif // PEER_H

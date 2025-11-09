@@ -9,48 +9,43 @@
 // Standard block size
 static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
 
+/**
+ * @brief Constructor for OUTBOUND connections (client initiates).
+ */
 PeerConnection::PeerConnection(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port)
   : ip_(std::move(peer_ip)),
     port_str_(std::to_string(peer_port)),
-    socket_(io_context) // Initialize the socket with the io_context
+    socket_(io_context), // Initialize the socket with the io_context
+    readHeaderBuffer_(4),
+    handshakeBuffer_(68)
 {
 }
 
 /**
- * @brief Constructs a peer connection.
- * @param io_context The single, shared Asio io_context.
- * @param peer_ip The IP address of the peer to connect to.
- * @param peer_port The port of the peer to connect to.
+ * @brief Constructor for INBOUND connections (they initiate).
  */
-void PeerConnection::connect() {
+PeerConnection::PeerConnection(asio::io_context& io_context, tcp::socket socket)
+  : std::enable_shared_from_this<PeerConnection>(),
+    socket_(std::move(socket)), // Move the already-connected socket
+    readHeaderBuffer_(4),
+    handshakeBuffer_(68)
+{
   try {
-    // Resolve the IP and Port
-    // This converts the string IP/port into a list of endpoints
-    tcp::resolver resolver(socket_.get_executor());
-    auto endpoints = resolver.resolve(ip_, port_str_);
-
-    // Connect to the first resolved endpoint
-    // This is a synchronous connect call. It will block until
-    // it connects or times out.
-    asio::connect(socket_, endpoints);
-
-    std::cout << "Successfully connected to peer: " << ip_ << ":" << port_str_ << std::endl;
-
+    // Get the IP and port from the socket
+    ip_ = socket_.remote_endpoint().address().to_string();
+    port_str_ = std::to_string(socket_.remote_endpoint().port());
   } catch (const std::exception& e) {
-    throw std::runtime_error("Failed to connect to peer " + ip_ + ":" + port_str_ + ": " + e.what());
+    std::cerr << "Error getting remote endpoint: " << e.what() << std::endl;
+    ip_ = "unknown";
+    port_str_ = "0";
   }
 }
 
 /**
  * @brief Performs the 68-byte BitTorrent handshake.
- * @param infoHash The 20-byte info_hash.
- * @param peerId Our 20-byte peer_id.
  * @return The 20-byte peer_id from the other client, or an empty vector on failure.
  */
-std::vector<unsigned char> PeerConnection::performHandshake(
-  const std::vector<unsigned char>& infoHash,
-  const std::string& peerId
-) {
+std::vector<unsigned char> PeerConnection::performHandshake() {
   /**
    * Construct the 68-byte handshake message
    * handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
@@ -78,10 +73,10 @@ std::vector<unsigned char> PeerConnection::performHandshake(
   // std::vector initializes to 0, so this is already done.
 
   // info_hash (20 bytes)
-  memcpy(&handshakeMsg[28], infoHash.data(), 20);
+  memcpy(&handshakeMsg[28], infoHash_.data(), 20);
 
   // peer_id (20 bytes)
-  memcpy(&handshakeMsg[48], peerId.c_str(), 20);
+  memcpy(&handshakeMsg[48], peerId_.c_str(), 20);
 
 
 
@@ -105,15 +100,14 @@ std::vector<unsigned char> PeerConnection::performHandshake(
   }
 
   // Validate the response
-  // Check pstr
+  // Should be "BitTorrent protocol"
   if (memcmp(&response[1], pstr, 19) != 0) {
-    // Should be "BitTorrent protocol"
     throw std::runtime_error("Peer sent invalid protocol string.");
   }
 
   // Check info_hash
-  if (memcmp(&response[28], infoHash.data(), 20) != 0) {
-    // Should be same as clients
+  // Should be same as clients
+  if (memcmp(&response[28], infoHash_.data(), 20) != 0) {
     throw std::runtime_error("Peer sent wrong info_hash!");
   }
 
@@ -122,18 +116,6 @@ std::vector<unsigned char> PeerConnection::performHandshake(
   std::vector<unsigned char> responsePeerId(20);
   memcpy(responsePeerId.data(), &response[48], 20);
   return responsePeerId;
-}
-
-/**
- * @brief Constructs and sends a Bitfield message (ID=5) to the peer.
- * @param bitfield The raw bytes of the bitfield.
- * @throws std::runtime_error on send failure.
- */
-void PeerConnection::sendBitfield(const std::vector<uint8_t>& bitfield) {
-  // A bitfield message has ID = 5
-  std::vector<unsigned char> payload(bitfield.begin(), bitfield.end());
-  sendMessage(5, payload);
-  std::cout << "Sent bitfield (" << payload.size() << " bytes) to " << ip_ << std::endl;
 }
 
 
@@ -158,6 +140,224 @@ void PeerConnection::sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t l
   memcpy(&payload[8], &length_net, 4);
   
   sendMessage(6, payload); // ID 6 = request
+}
+
+// --- STARTUP LOGIC (OUTBOUND) ---
+  /**
+   * @brief Starts the connection process for an OUTBOUND connection.
+   * (A connection the client makes from the peer list)
+   *
+   * This will connect, handshake, send bitfield, and start the message loop.
+   */
+void PeerConnection::startAsOutbound(
+    const std::vector<unsigned char>& infoHash,
+    const std::string& peerId,
+    long long pieceLength, 
+    long long totalLength, 
+    size_t numPieces, 
+    std::vector<uint8_t>* myBitfield,
+    std::string* pieceHashes
+) {
+  // Store torrent info
+  infoHash_ = infoHash;
+  peerId_ = peerId;
+  pieceLength_ = pieceLength;
+  totalLength_ = totalLength;
+  numPieces_ = numPieces;
+  myBitfield_ = myBitfield;
+  pieceHashes_ = pieceHashes;
+  
+  try {
+    
+    // Connect via socket
+    connect(); 
+
+    performHandshake();
+
+    sendBitfield(*myBitfield_);
+    
+    // Start async message loop
+    startAsyncRead();
+
+  } catch (const std::exception& e) {
+      std::cerr << "  Failed to start outbound connection to " << ip_ << ": " << e.what() << std::endl;
+  }
+}
+
+/**
+ * @brief Constructs a peer connection from ip and port
+ */
+void PeerConnection::connect() {
+  try {
+    // Resolve the IP and Port
+    // This converts the string IP/port into a list of endpoints
+    tcp::resolver resolver(socket_.get_executor());
+    auto endpoints = resolver.resolve(ip_, port_str_);
+
+    // Connect to the first resolved endpoint
+    // This is a synchronous connect call. It will block until
+    // it connects or times out.
+    asio::connect(socket_, endpoints);
+
+    std::cout << "Successfully connected to peer: " << ip_ << ":" << port_str_ << std::endl;
+
+  } catch (const std::exception& e) {
+    throw std::runtime_error("Failed to connect to peer " + ip_ + ":" + port_str_ + ": " + e.what());
+  }
+}
+
+/**
+ * @brief Constructs and sends a Bitfield message (ID=5) to the peer.
+ * @param bitfield The raw bytes of the bitfield.
+ * @throws std::runtime_error on send failure.
+ */
+void PeerConnection::sendBitfield(const std::vector<uint8_t>& bitfield) {
+  // A bitfield message has ID = 5
+  std::vector<unsigned char> payload(bitfield.begin(), bitfield.end());
+  sendMessage(5, payload);
+  std::cout << "Sent bitfield (" << payload.size() << " bytes) to " << ip_ << std::endl;
+}
+
+// --- STARTUP LOGIC (INBOUND) ---
+
+void PeerConnection::startAsInbound(
+    const std::vector<unsigned char>& infoHash,
+    const std::string& peerId,
+    long long pieceLength, 
+    long long totalLength, 
+    size_t numPieces, 
+    std::vector<uint8_t>* myBitfield,
+    std::string* pieceHashes
+) {
+  // Store torrent info
+  infoHash_ = infoHash;
+  peerId_ = peerId;
+  pieceLength_ = pieceLength;
+  totalLength_ = totalLength;
+  numPieces_ = numPieces;
+  myBitfield_ = myBitfield;
+  pieceHashes_ = pieceHashes;
+
+  // Read peer connecting handshake
+  asyncReadInboundHandshake();
+}
+
+/**
+ * @brief (INBOUND) 1. Start reading the 68-byte handshake.
+ */
+void PeerConnection::asyncReadInboundHandshake() {
+  auto self = shared_from_this();
+  asio::async_read(socket_, asio::buffer(handshakeBuffer_), asio::transfer_exactly(68),
+    [this, self](const boost::system::error_code& ec, size_t bytesTransferred) {
+      handleReadInboundHandshake(ec, bytesTransferred);
+    });
+}
+
+/**
+ * @brief (INBOUND) 2. Handle the 68-byte handshake we received.
+ */
+void PeerConnection::handleReadInboundHandshake(const boost::system::error_code& ec, size_t bytesTransferred) {
+  if (ec) {
+    std::cerr << "[" << ip_ << "] Inbound handshake read error: " << ec.message() << std::endl;
+    return; // Close connection
+  }
+  if (bytesTransferred != 68) {
+     std::cerr << "[" << ip_ << "] Inbound handshake read incomplete." << std::endl;
+     return; // Close
+  }
+  
+  // Validate the handshake
+  // Should be "BitTorrent protocol"
+  const char* pstr = "BitTorrent protocol";
+  if (memcmp(&handshakeBuffer_[1], pstr, 19) != 0) {
+    std::cerr << "[" << ip_ << "] Inbound handshake invalid protocol." << std::endl;
+    return; // Close
+  }
+
+  // Check info_hash
+  // Should be same as clients
+  if (memcmp(&handshakeBuffer_[28], infoHash_.data(), 20) != 0) {
+    std::cerr << "[" << ip_ << "] Inbound handshake wrong info_hash." << std::endl;
+    return; // Close
+  }
+  
+  std::cout << "[" << ip_ << "] Inbound handshake validated." << std::endl;
+  // TODO: Store their peer ID from handshakeBuffer_[48]
+  
+  // Send handshake in reply
+  asyncWriteInboundHandshake();
+}
+
+/**
+ * @brief (INBOUND) 3. Send our 68-byte handshake reply.
+ */
+void PeerConnection::asyncWriteInboundHandshake() {
+  // Create our handshake
+  handshakeBuffer_.resize(68); // Reuse the buffer
+  handshakeBuffer_[0] = 19;
+  const char* pstr = "BitTorrent protocol";
+  memcpy(&handshakeBuffer_[1], pstr, 19);
+  memcpy(&handshakeBuffer_[28], infoHash_.data(), 20);
+  memcpy(&handshakeBuffer_[48], peerId_.c_str(), 20);
+
+  auto self = shared_from_this();
+  asio::async_write(socket_, asio::buffer(handshakeBuffer_),
+    [this, self](const boost::system::error_code& ec, size_t bytesTransferred) {
+      handleWriteInboundHandshake(ec, bytesTransferred);
+    });
+}
+
+/**
+ * @brief (INBOUND) 4. Handle the completion of our handshake write.
+ */
+void PeerConnection::handleWriteInboundHandshake(const boost::system::error_code& ec, size_t bytesTransferred) {
+  if (ec) {
+    std::cerr << "[" << ip_ << "] Inbound handshake write error: " << ec.message() << std::endl;
+    return;
+  }
+  
+  std::cout << "[" << ip_ << "] Replied with our handshake." << std::endl;
+
+  // Send our bitfield
+  asyncWriteInboundBitfield();
+}
+
+/**
+ * @brief (INBOUND) Send our bitfield.
+ */
+void PeerConnection::asyncWriteInboundBitfield() {
+  // Create message: <len><id><payload>
+  uint32_t length = 1 + myBitfield_->size();
+  uint32_t length_net = htonl(length);
+  uint8_t id = 5;
+
+  // We need to use a stable buffer for async write, so we'll
+  // build the message in readBodyBuffer_ (re-using it)
+  readBodyBuffer_.resize(4 + length);
+  memcpy(&readBodyBuffer_[0], &length_net, 4);
+  memcpy(&readBodyBuffer_[4], &id, 1);
+  memcpy(&readBodyBuffer_[5], myBitfield_->data(), myBitfield_->size());
+
+  auto self = shared_from_this();
+  asio::async_write(socket_, asio::buffer(readBodyBuffer_),
+    [this, self](const boost::system::error_code& ec, size_t bytesTransferred) {
+      handleWriteInboundBitfield(ec, bytesTransferred);
+    });
+}
+
+/**
+ * @brief (INBOUND) 6. Handle completion of bitfield write.
+ */
+void PeerConnection::handleWriteInboundBitfield(const boost::system::error_code& ec, size_t bytesTransferred) {
+   if (ec) {
+    std::cerr << "[" << ip_ << "] Inbound bitfield write error: " << ec.message() << std::endl;
+    return;
+  }
+  
+  std::cout << "[" << ip_ << "] Sent bitfield to inbound peer." << std::endl;
+  
+  // Start the main message loop
+  startAsyncRead();
 }
 
 /**
@@ -186,40 +386,6 @@ void PeerConnection::sendMessage(uint8_t id, const std::vector<unsigned char>& p
   } catch (const std::exception& e) {
     throw std::runtime_error("Failed to send message: " + std::string(e.what()));
   }
-}
-
-  /**
-   * @brief Starts the asynchronous state machine of the peer
-   * Here for the public facing start function
-   * 
-   * Sets the requisite variables 
-   * 
-   * @param pieceLength The length of one piece in bytes.
-   * @param totalLength The total length of the torrent in bytes.
-   * @param numPieces The total number of pieces.
-   * @param myBitfield A pointer to the client's master bitfield.
-   */
-void PeerConnection::start(
-    long long pieceLength, 
-    long long totalLength, 
-    size_t numPieces, 
-    std::vector<uint8_t>* myBitfield,
-    std::string* pieceHashes
-) {
-  std::cout << "[" << ip_ << "] Starting message loop." << std::endl;
-  
-  // Store the torrent info
-  pieceLength_ = pieceLength;
-  totalLength_ = totalLength;
-  numPieces_ = numPieces;
-  myBitfield_ = myBitfield; // Store pointer to client's bitfield
-  pieceHashes_ = pieceHashes;
-
-  // Initialize for 4-byte length prefix
-  readHeaderBuffer_.resize(4);
-
-  // Start the async read loop
-  startAsyncRead();
 }
 
 // --- Async Read Loop ---
