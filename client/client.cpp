@@ -1,5 +1,5 @@
 #include "client.h"
-#include "peer.h"     // For PeerConnection
+#include "peer.h"     // For Peer
 #include "bencode.h"  // For BencodeValue, parseBencodedValue
 
 #include <iostream>    // For std::cout, std::cerr
@@ -263,8 +263,8 @@ void Client::requestPeers() {
     if (respDict->count("peers")) {
       auto& peersVal = respDict->at("peers")->value;
       if (auto* peersStr = std::get_if<std::string>(&peersVal)) {
-        peers_ = parseCompactPeers(*peersStr); // Store peers in member
-        for (const auto& peer : peers_) {
+        trackerPeers_ = parseCompactPeers(*peersStr); // Store peers in member
+        for (const auto& peer : trackerPeers_) {
           std::cout << "Peer: " << peer.ip << ":" << peer.port << std::endl;
         }
       } else {
@@ -277,7 +277,7 @@ void Client::requestPeers() {
 }
 
 void Client::connectToPeers() {
-  if (peers_.empty()) {
+  if (trackerPeers_.empty()) {
     std::cout << "\nNo peers found. Exiting." << std::endl;
     return;
   }
@@ -285,33 +285,27 @@ void Client::connectToPeers() {
   std::cout << "\n--- CONNECTING TO PEERS ---" << std::endl;
 
   // Try to connect to every peer
-  for (const auto& peer : peers_) {
-    try {
-      // Create the connection object
-      auto peerConn = std::make_shared<PeerConnection>(io_context_, peer.ip, peer.port);
+  for (const auto& peerInfo : trackerPeers_) {
+    // Create the connection object
+    auto peer = std::make_shared<Peer>(io_context_, peerInfo.ip, peerInfo.port);
 
-      std::cout << "Connecting to " << peer.ip << ":" << peer.port << std::endl;
+    std::cout << "Connecting to " << peerInfo.ip << ":" << peerInfo.port << std::endl;
 
-      peerConn->startAsOutbound(
-          torrent_.infoHash,
-          peerId_,
-          pieceLength_,
-          totalLength_,
-          numPieces_,
-          &myBitfield_,
-          &pieceHashes_
-      );
+    peer->startAsOutbound(
+        torrent_.infoHash,
+        peerId_,
+        pieceLength_,
+        totalLength_,
+        numPieces_,
+        &myBitfield_,
+        &pieceHashes_
+    );
 
-      // Add peer to peer lists
-      peerConnections_.push_back(peerConn);
-
-    } catch (const std::exception& e) {
-      // If one peer fails, just print an error and continue with the next one
-      std::cerr << "  Failed to connect to peer " << peer.ip << ": " << e.what() << std::endl;
-    }
+    // Add peer to peer lists
+    activePeers_.push_back(peer);
   }
 
-  std::cout << "--- CONNECTED TO " << peerConnections_.size() << " PEERS ---" << std::endl;
+  std::cout << "--- CONNECTED TO " << activePeers_.size() << " PEERS ---" << std::endl;
 }
 
 /**
@@ -339,11 +333,11 @@ void Client::handleAccept(const boost::system::error_code& ec, tcp::socket socke
               << " ---" << std::endl;
               
     // Create a PeerConnection object from the existing socket
-    auto peerConn = std::make_shared<PeerConnection>(io_context_, std::move(socket));
+    auto peer = std::make_shared<Peer>(io_context_, std::move(socket));
 
     // Start the inbound connection process
     // This will wait for the peer's handshake, then reply
-    peerConn->startAsInbound(
+    peer->startAsInbound(
           torrent_.infoHash,
           peerId_,
           pieceLength_,
@@ -354,7 +348,7 @@ void Client::handleAccept(const boost::system::error_code& ec, tcp::socket socke
     );
 
     // Add peer to peer lists
-    peerConnections_.push_back(peerConn);
+    activePeers_.push_back(peer);
 
   } else {
     // An error occurred

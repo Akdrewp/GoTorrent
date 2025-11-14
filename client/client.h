@@ -2,7 +2,7 @@
 #define CLIENT_H
 
 #include "torrent.h" // For TorrentData
-#include "tracker.h" // For Peer
+#include "tracker.h" // For PeerInfo
 #include <boost/asio.hpp>
 #include <boost/asio/ip/tcp.hpp> // For tcp::acceptor
 #include <string>
@@ -13,8 +13,8 @@
 namespace asio = boost::asio;
 using asio::ip::tcp;
 
-// Forward declrationg defined in peer.h
-class PeerConnection;
+// Forward declaration defined in peer.h
+class Peer;
 
 // Forward declration defined in peer.h
 struct PeerMessage;
@@ -99,15 +99,13 @@ private:
 
   // --- Server Variables ---
   std::string peerId_;
-  std::vector<Peer> peers_;
+  std::vector<PeerInfo> trackerPeers_;
   long long port_;
 
   tcp::acceptor acceptor_;
 
-  // Stores the peer connections
-  // @TODO combine Peer and PeerConnection Object?
-  // Stores a vector of pointers to each connection
-  std::vector<std::shared_ptr<PeerConnection>> peerConnections_;
+  // Stores the peers
+  std::vector<std::shared_ptr<Peer>> activePeers_;
 };
 
 #endif // CLIENT_H

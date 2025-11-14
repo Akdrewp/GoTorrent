@@ -1,7 +1,7 @@
 #ifndef PEER_H
 #define PEER_H
 
-#include <boost/asio.hpp> // Main Asio header
+#include "peerConnection.h"
 #include <string>
 #include <vector>
 #include <optional>
@@ -13,14 +13,6 @@ namespace asio = boost::asio;
 using asio::ip::tcp;
 
 /**
- * @brief Represents a single message received from a peer.
- */
-struct PeerMessage {
-  uint8_t id;
-  std::vector<unsigned char> payload;
-};
-
-/**
  * @brief Holds info about a block request we are waiting for.
  */
 struct PendingRequest {
@@ -30,9 +22,9 @@ struct PendingRequest {
 };
 
 /**
- * @brief Manages a single TCP connection to a BitTorrent peer.
+ * @brief Manages state and logic for a peer
  */
-class PeerConnection : public std::enable_shared_from_this<PeerConnection> {
+class Peer : public std::enable_shared_from_this<Peer> {
 public:
 
   /**
@@ -44,7 +36,7 @@ public:
    * @param peer_ip The IP address of the peer to connect to.
    * @param peer_port The port of the peer to connect to.
    */
-  PeerConnection(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port);
+  Peer(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port);
 
   /**
    * @brief Constructor a peer connection from an existing socket
@@ -54,7 +46,7 @@ public:
    * @param io_context The single, shared Asio io_context.
    * @param socket An already-connected socket from a tcp::acceptor.
    */
-  PeerConnection(asio::io_context& io_context, tcp::socket socket);
+  Peer(asio::io_context& io_context, tcp::socket socket);
 
   /**
    * @brief Starts the connection process for an OUTBOUND connection.
@@ -86,29 +78,10 @@ public:
     std::string* pieceHashes
   );
 
-  /**
-   * @brief Attempts to synchronously connect to the peer.
-   * @throws std::exception on connection failure.
-   */
-  void connect();
+  // --- Message Senders ---
 
   /**
-   * @brief Performs the 68-byte BitTorrent handshake.
-   * @param infoHash The 20-byte info_hash.
-   * @param peerId Our 20-byte peer_id.
-   * @return The 20-byte peer_id from the other client, or an empty vector on failure.
-   */
-  std::vector<unsigned char> performHandshake();
-
-  /**
-   * @brief Constructs and sends a Bitfield message (ID=5) to the peer.
-   * @param bitfield The raw bytes of our bitfield.
-   * @throws std::runtime_error on send failure.
-   */
-  void sendBitfield(const std::vector<uint8_t>& bitfield);
-
-  /**
-   * @brief Sends an Interested message (ID 2).
+   * @brief Sends an Interested message (ID 2) 
    */
   void sendInterested();
 
@@ -123,6 +96,11 @@ public:
    * @param length The requested length of the block (e.g., 16384).
    */
   void sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length);
+
+  /**
+   * @brief Sends a Bitfield message (ID 5).
+   */
+  void sendBitfield();
 
   /**
    * @brief Updates the peer's bitfield to indicate they have a piece.
@@ -146,73 +124,24 @@ public:
   /** @brief Bitfield of the peer */
   std::vector<uint8_t> bitfield_;
   
-  /** @brief Are we choking this peer? (i.e., not sending them data) */
   bool amChoking_ = true;
-  
-  /** @brief Is this peer choking us? (i.e., not willing to send us data) */
   bool peerChoking_ = true;
-  
-  /** @brief Are we interested in what this peer has? */
   bool amInterested_ = false;
-  
-  /** @brief Is this peer interested in what we have? */
   bool peerInterested_ = false;
 
 private:
 
-    // --- Inbound Handshake Logic ---
-  void asyncReadInboundHandshake();
-  void handleReadInboundHandshake(const boost::system::error_code& ec, size_t bytesTransferred);
-  void asyncWriteInboundHandshake();
-  void handleWriteInboundHandshake(const boost::system::error_code& ec, size_t bytesTransferred);
-  void asyncWriteInboundBitfield();
-  void handleWriteInboundBitfield(const boost::system::error_code& ec, size_t bytesTransferred);
-
-
-  // --- Async Read Loop ---
+  // --- Callback handlers called by PeerConnection ---
 
   /**
-   * @brief Begins the asyncronous read for the 4-byte message header
-   * 
-   * Calls handleReadHeader as the completion handler
+   * @brief Called by PeerConnection when handshake is complete.
    */
-  void startAsyncRead();
+  void onHandshakeComplete(const boost::system::error_code& ec, std::vector<unsigned char> peerId);
 
   /**
-   * @brief Begins an asynchronous read for the message body (ID + payload).
-   * 
-   * Calls handleReadBody as the completion handler
-   * 
-   * @param msgLength The length of the body to read.
+   * @brief Called by PeerConnection when a message arrives or connection drops.
    */
-  void startAsyncReadBody(uint32_t msgLength);
-
-  /**
-   * @brief Handles the 4-byte message header and checks that read has succeeded
-   * 
-   * Starts the aynchronous reading of the body
-   * 
-   * Enforces the 16KB max payload
-   * https://www.bittorrent.org/beps/bep_0003.html
-   * 
-   * @param ec Error code passed in by asio:async_read
-   * 
-   * Calls handleReadHeader as the completion handler
-   */
-  void handleReadHeader(const boost::system::error_code& ec);
-
-  /**
-   * @brief Handles the message from the peer
-   * 
-   * Completion handler for startAsyncReadBody
-   * 
-   * Handles the message via state changing and action functions
-   * 
-   * @param ec Error code passed in by asio:async_read
-   * 
-   * Calls handleReadHeader as the completion handler
-   */
-  void handleReadBody(uint32_t msgLength, const boost::system::error_code& ec);
+  void onMessageReceived(const boost::system::error_code& ec, std::optional<PeerMessage> msg);
 
   // --- Message Handlers (State Changers) ---
 
@@ -257,6 +186,8 @@ private:
    */
   void requestPiece();
 
+  // Make better description.
+  // This does the entire loop based on state 
   void doAction();
 
   /** 
@@ -269,7 +200,18 @@ private:
 
   // --- Helper Functions ---
   
+  /**
+   * @brief Checks whether the client has the piece of pieceIndex in their bitfield
+   * 
+   * @param pieceIndex index of piece to check
+   */
   bool clientHasPiece(size_t pieceIndex) const;
+
+  /**
+ * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
+ * 
+ * @param pieceIndex index of piece to check the hash of
+ */
   bool verifyPieceHash(size_t pieceIndex);
 
   /**
@@ -299,14 +241,8 @@ private:
   std::string peerId_;
 
   // --- Asio Variables ---
-  std::string ip_;
-  std::string port_str_;
-  tcp::socket socket_; // The socket for this connection
-
-  // Buffers for async reading
-  std::vector<uint8_t> readHeaderBuffer_; // 4-byte length prefix
-  std::vector<uint8_t> readBodyBuffer_;   // For message ID + payload
-  std::vector<uint8_t> handshakeBuffer_;  // 68 bytes
+  std::string ip_; // For console logging
+  std::shared_ptr<PeerConnection> conn_; // Socket connection layer
 };
 
 #endif // PEER_H

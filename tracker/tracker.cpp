@@ -158,8 +158,8 @@ std::string buildTrackerUrl(
  * @return A vector of Peer structs.
  * @throws std::runtime_error if the peer string has an invalid length.
  */
-std::vector<Peer> parseCompactPeers(const std::string& peers) {
-  std::vector<Peer> peerList;
+std::vector<PeerInfo> parseCompactPeers(const std::string& peers) {
+  std::vector<PeerInfo> peerList;
   
   // Check that the string length is a multiple of 6
   if (peers.length() % 6 != 0) {
@@ -171,7 +171,7 @@ std::vector<Peer> parseCompactPeers(const std::string& peers) {
 
   // Loop 6 bytes at a time
   for (size_t i = 0; i < peers.length(); i += 6) {
-    Peer p;
+    PeerInfo p;
 
     // Parse the IP
     struct in_addr ip_addr;
