@@ -1,15 +1,20 @@
-#include "torrent.h"  // Torrent logic header
-#include "tracker.h"  // Tracker logic header
-#include <iostream>   // For std::cout, std::cerr
-#include <iomanip>    // For std::setw, std::hex
-#include <variant>    // For std::visit
-#include <stdexcept>  // For std::runtime_error
-#include <random>     // For std::random_device
+#include "client.h"
+#include "peer.h"     // For Peer
+#include "bencode.h"  // For BencodeValue, parseBencodedValue
 
-// --- Printing Functions (for debugging) ---
+#include <iostream>    // For std::cout, std::cerr
+#include <iomanip>     // For std::setw, std::hex
+#include <variant>     // For std::visit, std::get_if
+#include <stdexcept>   // For std::runtime_error
+#include <random>      // For std::random_device, std::mt19937
 
-// Forward declaration for recursion
-void printBencodeValue(const BencodeValue& bv, int indent = 0);
+// --- Constants ---
+static constexpr uint32_t BLOCK_SIZE = 16384;
+
+// --- Static Helper Functions (Internal to this file) ---
+
+// Forward declaration
+static void printBencodeValue(const BencodeValue& bv, int indent = 0);
 
 /**
  * @brief Helper struct for using std::visit to print BencodeValue
@@ -20,6 +25,12 @@ struct BencodePrinter {
     std::cout << val;
   }
   void operator()(const std::string& val) const {
+    // Redact 'peers' string
+    if (indent > 2) { // A bit of a heuristic to find the peers value
+       std::cout << "\"(... compact peers data ...)\"";
+       return;
+    }
+
     std::cout << "\"";
     for(unsigned char c : val) {
       if (std::isprint(c) && c != '\\' && c != '\"') {
@@ -45,6 +56,8 @@ struct BencodePrinter {
       std::cout << std::string(indent + 2, ' ') << "\"" << key << "\": ";
       if (key == "pieces") {
         std::cout << "\"(... pieces data redacted ...)\"";
+      } else if (key == "peers") {
+        printBencodeValue(*val_ptr, indent + 2); 
       } else {
         printBencodeValue(*val_ptr, indent + 2); // Recursive call
       }
@@ -57,7 +70,7 @@ struct BencodePrinter {
 /**
  * @brief Pretty-prints a parsed BencodeValue.
  */
-void printBencodeValue(const BencodeValue& bv, int indent) {
+static void printBencodeValue(const BencodeValue& bv, int indent) {
   std::visit(BencodePrinter{indent}, bv.value);
 }
 
@@ -82,19 +95,14 @@ void printBencodeValue(const BencodeValue& bv, int indent) {
  * 
  * @return A 20-byte string.
  */
-std::string generatePeerId() {
-  // Set client prefix
-  // "GoTorrent" v0.0.1
+static std::string generatePeerId() {
   const std::string clientPrefix = "-GT0001-";
-
-  // Set up the random part
   std::string peerId = clientPrefix;
-  peerId.reserve(20); // Reserve 20 bytes total
+  peerId.reserve(20); 
 
-  // Use C++11 <random> to generate 12 random digits
-  std::random_device rd;  // Seed
-  std::mt19937 gen(rd()); // Mersenne Twister engine
-  std::uniform_int_distribution<> dis(0, 9); // Distribution for 0-9
+  std::random_device rd;  
+  std::mt19937 gen(rd()); 
+  std::uniform_int_distribution<> dis(0, 9); 
 
   for (int i = 0; i < 12; ++i) {
     peerId += std::to_string(dis(gen));
@@ -104,20 +112,94 @@ std::string generatePeerId() {
 }
 
 
+// --- Client Class Implementation ---
 
-void runClient(const std::string& torrentFilePath) {
+Client::Client(asio::io_context& io_context, std::string torrentFilePath)
+  : io_context_(io_context),
+    torrentFilePath_(std::move(torrentFilePath)),
+    port_(6882), // Hardcode port for now
+    acceptor_(io_context, tcp::endpoint(tcp::v4(), port_)) // Initialize the acceptor
+{
+}
+
+// Defining the constructor here as default
+// allows for forward declaration of PeerConnection
+// in client.h.
+Client::~Client() = default;
+
+void Client::run() {
+  loadTorrent();
+  requestPeers();
+  connectToPeers();
+  startAccepting(); // Start listening for inbound connections
+  
+  // Run the Asio event loop, processing all async operations.
+  // This blocks until all work is finished.
+  // (Which should never happen since 
+  // it calls async reads constantly.)
+  std::cout << "\n--- STARTING ASIO EVENT LOOP ---" << std::endl;
+  try {
+    io_context_.run();
+  } catch (const std::exception& e) {
+    std::cerr << "Event loop error: " << e.what() << std::endl;
+  }
+  std::cout << "--- ASIO EVENT LOOP ENDED ---" << std::endl;
+}
+
+void Client::loadTorrent() {
   // Parse torrent file
-  TorrentData torrent = parseTorrentFile(torrentFilePath);
+  torrent_ = parseTorrentFile(torrentFilePath_);
 
   // Generate a peer_id
-  std::string peerId = generatePeerId();
-  
-  // Get a port to listen to
-  // For now just use 6881
-  long long port = 6881;
+  peerId_ = generatePeerId();
 
+  // Calculate our bitfield size
+  auto& infoVal = torrent_.mainData.at("info")->value;
+  auto* infoDict = std::get_if<BencodeDict>(&infoVal);
+  if (!infoDict) throw std::runtime_error("Invalid info dictionary.");
+
+  auto& piecesVal = infoDict->at("pieces")->value;
+  auto* piecesStr = std::get_if<std::string>(&piecesVal);
+  if (!piecesStr) throw std::runtime_error("Invalid 'pieces' string.");
+
+  // Store the pieces hashes
+  pieceHashes_ = *piecesStr;
+
+  // Each piece has a hash in "pieces" each with length 20
+  // Amount of pieces is length of "pieces" / 20
+  numPieces_ = piecesStr->length() / 20;
+
+  auto& pieceLenVal = infoDict->at("piece length")->value;
+  if (auto* len = std::get_if<long long>(&pieceLenVal)) {
+      pieceLength_ = *len;
+  } else {
+      throw std::runtime_error("Invalid 'piece length'.");
+  }
+  totalLength_ = getTotalLength(*infoDict); 
+  std::cout << "Torrent piece length: " << pieceLength_ << std::endl;
+  std::cout << "Torrent total length: " << totalLength_ << std::endl;
+
+  // Each bit in the bitfield corresponds to a piece being recieved
+  //
+  // Need amount of pieces / 8 (bits in byte) rounded up to hold
+  // trailing bits
+  size_t bitfieldSize = (numPieces_ + 7) / 8; // ceil(numPieces / 8.0)
+
+  // Create and send our bitfield (all zeros, we have no pieces)
+  myBitfield_.resize(bitfieldSize, 0);
+
+  // Print the hash
+  std::cout << "--- INFO HASH ---" << std::endl;
+  std::cout << std::hex << std::setfill('0');
+  for (unsigned char c : torrent_.infoHash) {
+    std::cout << std::setw(2) << static_cast<int>(c);
+  }
+  std::cout << std::dec << std::endl;
+}
+
+void Client::requestPeers() {
   // Get announce URL
-  auto& announceVal = torrent.mainData.at("announce")->value;
+  auto& announceVal = torrent_.mainData.at("announce")->value;
   std::string announceUrl;
   if (auto* url = std::get_if<std::string>(&announceVal)) {
     announceUrl = *url;
@@ -126,11 +208,9 @@ void runClient(const std::string& torrentFilePath) {
   }
 
   // Get total length (for initial "left")
-  auto& infoVal = torrent.mainData.at("info")->value;
+  auto& infoVal = torrent_.mainData.at("info")->value;
   long long totalLength = 0;
   if (auto* infoDict = std::get_if<BencodeDict>(&infoVal)) {
-    // It's a dictionary! Pass it to our helper function.
-    // infoDict is a BencodeDict*, so we dereference it with *
     totalLength = getTotalLength(*infoDict);
   } else {
     throw std::runtime_error("Torrent 'info' field is not a dictionary.");
@@ -139,55 +219,40 @@ void runClient(const std::string& torrentFilePath) {
   // Build the Tracker GET URL
   std::string trackerUrl = buildTrackerUrl(
     announceUrl,
-    torrent.infoHash,
-    peerId,
-    port, // port
+    torrent_.infoHash,
+    peerId_,
+    port_,
     0,    // uploaded
     0,    // downloaded
     totalLength,
-    1     //compact
+    1     // compact
   );
 
-
-  // Print the results
+  // Print request details
   std::cout << "\n--- PREPARING TRACKER REQUEST ---" << std::endl;
-  std::cout << "Peer ID: " << peerId << std::endl;
+  std::cout << "Peer ID: " << peerId_ << std::endl;
   std::cout << "Announce URL: " << announceUrl << std::endl;
   std::cout << "Total Length (left): " << totalLength << std::endl;
-
-  // Print the hash
-  std::cout << "--- INFO HASH ---" << std::endl;
-  std::cout << std::hex << std::setfill('0');
-  for (unsigned char c : torrent.infoHash) {
-    std::cout << std::setw(2) << static_cast<int>(c);
-  }
-  std::cout << std::dec << std::endl;
-
-  // Print the final URL
   std::cout << "\n--- COMPLETE TRACKER URL ---" << std::endl;
   std::cout << trackerUrl << std::endl;
 
+  // Send request
   std::cout << "\n--- SENDING REQUEST TO TRACKER ---" << std::endl;
   std::string trackerResponse = sendTrackerRequest(trackerUrl);
-
   std::cout << "Tracker raw response size: " << trackerResponse.size() << " bytes" << std::endl;
 
   // Parse the tracker's response
-  // Should be in bencode
   std::cout << "\n--- PARSING TRACKER RESPONSE ---" << std::endl;
   size_t index = 0;
-  // Convert string to vector<char> for our parser
   std::vector<char> responseBytes(trackerResponse.begin(), trackerResponse.end());
   BencodeValue parsedResponse = parseBencodedValue(responseBytes, index);
   
-  // Print the parsed response
   printBencodeValue(parsedResponse);
   std::cout << std::endl;
 
-  
+  // Get peer list
   std::cout << "\n--- PARSED PEER LIST ---" << std::endl;
   if (auto* respDict = std::get_if<BencodeDict>(&parsedResponse.value)) {
-    // Check for failure
     if (respDict->count("failure reason")) {
       auto& failVal = respDict->at("failure reason")->value;
       if (auto* failStr = std::get_if<std::string>(&failVal)) {
@@ -195,13 +260,11 @@ void runClient(const std::string& torrentFilePath) {
       }
     }
 
-    // Check for peers
     if (respDict->count("peers")) {
       auto& peersVal = respDict->at("peers")->value;
       if (auto* peersStr = std::get_if<std::string>(&peersVal)) {
-        // It's a compact string!
-        std::vector<Peer> peers = parseCompactPeers(*peersStr);
-        for (const auto& peer : peers) {
+        trackerPeers_ = parseCompactPeers(*peersStr); // Store peers in member
+        for (const auto& peer : trackerPeers_) {
           std::cout << "Peer: " << peer.ip << ":" << peer.port << std::endl;
         }
       } else {
@@ -211,4 +274,87 @@ void runClient(const std::string& torrentFilePath) {
   } else {
     throw std::runtime_error("Tracker response was not a dictionary.");
   }
+}
+
+void Client::connectToPeers() {
+  if (trackerPeers_.empty()) {
+    std::cout << "\nNo peers found. Exiting." << std::endl;
+    return;
+  }
+
+  std::cout << "\n--- CONNECTING TO PEERS ---" << std::endl;
+
+  // Try to connect to every peer
+  for (const auto& peerInfo : trackerPeers_) {
+    // Create the connection object
+    auto peer = std::make_shared<Peer>(io_context_, peerInfo.ip, peerInfo.port);
+
+    std::cout << "Connecting to " << peerInfo.ip << ":" << peerInfo.port << std::endl;
+
+    peer->startAsOutbound(
+        torrent_.infoHash,
+        peerId_,
+        pieceLength_,
+        totalLength_,
+        numPieces_,
+        &myBitfield_,
+        &pieceHashes_
+    );
+
+    // Add peer to peer lists
+    activePeers_.push_back(peer);
+  }
+
+  std::cout << "--- CONNECTED TO " << activePeers_.size() << " PEERS ---" << std::endl;
+}
+
+/**
+ * @brief Starts the TCP acceptor to listen for new peers (Inbound).
+ */
+void Client::startAccepting() {
+  std::cout << "Waiting for inbound connections..." << std::endl;
+  
+  // Start an asynchronous accept operation.
+  // Completion handler is handleAccept
+  acceptor_.async_accept(
+    [this](const boost::system::error_code& ec, tcp::socket socket) {
+      handleAccept(ec, std::move(socket));
+    }
+  );
+}
+
+/**
+ * @brief Callback function to handle a new inbound peer connection.
+ */
+void Client::handleAccept(const boost::system::error_code& ec, tcp::socket socket) {
+  if (!ec) {
+    std::cout << "\n--- INBOUND CONNECTION from " 
+              << socket.remote_endpoint().address().to_string() 
+              << " ---" << std::endl;
+              
+    // Create a PeerConnection object from the existing socket
+    auto peer = std::make_shared<Peer>(io_context_, std::move(socket));
+
+    // Start the inbound connection process
+    // This will wait for the peer's handshake, then reply
+    peer->startAsInbound(
+          torrent_.infoHash,
+          peerId_,
+          pieceLength_,
+          totalLength_,
+          numPieces_,
+          &myBitfield_,
+          &pieceHashes_
+    );
+
+    // Add peer to peer lists
+    activePeers_.push_back(peer);
+
+  } else {
+    // An error occurred
+    std::cerr << "Acceptor error: " << ec.message() << std::endl;
+  }
+
+  // Listen for the next connection, regardless of what happened
+  startAccepting();
 }

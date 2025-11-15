@@ -1,7 +1,8 @@
-#include "client.h" // --- NEW: Include our main client logic ---
-#include <curl/curl.h> // For curl_global_init/cleanup
-#include <iostream>    // For std::cout, std::cerr
-#include <stdexcept>   // For std::runtime_error
+#include "client.h"       // Client header logic
+#include <boost/asio.hpp> // For Asio io_contex
+#include <curl/curl.h>    // For curl_global_init/cleanup
+#include <iostream>       // For std::cout, std::cerr
+#include <stdexcept>      // For std::runtime_error
 
 int main(int argc, char* argv[]) {
   // Initialize libcurl
@@ -16,9 +17,12 @@ int main(int argc, char* argv[]) {
   std::string torrentFilePath = argv[1];
 
   try {
-    // --- Run the client logic ---
-    // This function now does all the work
-    runClient(torrentFilePath);
+    // Create main asio context
+    asio::io_context io_context;
+
+    // Create and run the client
+    Client client(io_context, torrentFilePath);
+    client.run();
 
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
@@ -28,6 +32,7 @@ int main(int argc, char* argv[]) {
 
   // Clean up libcurl
   curl_global_cleanup();
+  std::cout << "\n--- RETURNING 0 MAIN FUNCTION END ---" << std::endl;
   return 0;
 }
 

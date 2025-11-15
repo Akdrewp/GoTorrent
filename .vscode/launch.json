@@ -6,13 +6,13 @@
       "type": "cppdbg",
       "request": "launch",
       // Updated program name to match the Makefile
-      "program": "${fileDirname}/bittorrent_client",
+      "program": "${workspaceFolder}/bittorrent_client",
       "args": [
         // Add a default torrent file to debug with
-        "../ubuntu-25.10-desktop-amd64.iso.torrent"
+        "${workspaceFolder}/ubuntu-25.10-desktop-amd64.iso.torrent"
       ],
       "stopAtEntry": false,
-      "cwd": "${fileDirname}",
+      "cwd": "${workspaceFolder}",
       "environment": [],
       "externalConsole": false,
       "MIMode": "gdb",
