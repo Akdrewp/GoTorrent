@@ -2,12 +2,22 @@
 #define CLIENT_H
 
 #include "torrent.h" // For TorrentData
-#include "tracker.h" // For Peer
+#include "tracker.h" // For PeerInfo
 #include <boost/asio.hpp>
+#include <boost/asio/ip/tcp.hpp> // For tcp::acceptor
 #include <string>
 #include <vector>
+#include <optional>
+#include <memory>
 
 namespace asio = boost::asio;
+using asio::ip::tcp;
+
+// Forward declaration defined in peer.h
+class Peer;
+
+// Forward declration defined in peer.h
+struct PeerMessage;
 
 /**
  * @brief Main BitTorrent client class.
@@ -33,7 +43,19 @@ public:
    */
   void run();
 
-private:
+  /**
+   * @brief Destructor.
+   *
+   * Defined in the .cpp file to allow std::unique_ptr
+   * to work with a forward-declared PeerConnection.
+   */
+  ~Client();
+
+private: 
+
+  /**
+   * @TODO Redo comments for multiple peers
+   */
   /**
    * @brief Loads torrent file, parses it, and generates our peer_id.
    */
@@ -49,14 +71,41 @@ private:
    */
   void connectToPeers();
 
-  // Member variables
+  /**
+   * @brief Starts the TCP acceptor to listen for new peers (Inbound).
+   */
+  void startAccepting();
+
+  /**
+   * @brief Callback function to handle a new inbound peer connection.
+   * @param ec An error code from the accept operation.
+   * @param socket The new socket for the connected peer.
+   */
+  void handleAccept(const boost::system::error_code& ec, tcp::socket socket);
+
+
+  // --- Torrent Info ---
+  long long pieceLength_ = 0;
+  long long totalLength_ = 0;
+  size_t numPieces_ = 0;
+  std::vector<uint8_t> myBitfield_; // Client bitfield
+  std::string pieceHashes_;         // Raw 20-byte SHA1 hashes
+
+  // --- External Variables ---
   asio::io_context& io_context_;
   std::string torrentFilePath_;
   
   TorrentData torrent_;
+
+  // --- Server Variables ---
   std::string peerId_;
-  std::vector<Peer> peers_;
+  std::vector<PeerInfo> trackerPeers_;
   long long port_;
+
+  tcp::acceptor acceptor_;
+
+  // Stores the peers
+  std::vector<std::shared_ptr<Peer>> activePeers_;
 };
 
 #endif // CLIENT_H

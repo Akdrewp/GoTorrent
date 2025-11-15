@@ -1,5 +1,5 @@
 #include "client.h"
-#include "peer.h"     // For PeerConnection
+#include "peer.h"     // For Peer
 #include "bencode.h"  // For BencodeValue, parseBencodedValue
 
 #include <iostream>    // For std::cout, std::cerr
@@ -7,6 +7,9 @@
 #include <variant>     // For std::visit, std::get_if
 #include <stdexcept>   // For std::runtime_error
 #include <random>      // For std::random_device, std::mt19937
+
+// --- Constants ---
+static constexpr uint32_t BLOCK_SIZE = 16384;
 
 // --- Static Helper Functions (Internal to this file) ---
 
@@ -114,14 +117,33 @@ static std::string generatePeerId() {
 Client::Client(asio::io_context& io_context, std::string torrentFilePath)
   : io_context_(io_context),
     torrentFilePath_(std::move(torrentFilePath)),
-    port_(6881) // Hardcode port for now
+    port_(6882), // Hardcode port for now
+    acceptor_(io_context, tcp::endpoint(tcp::v4(), port_)) // Initialize the acceptor
 {
 }
+
+// Defining the constructor here as default
+// allows for forward declaration of PeerConnection
+// in client.h.
+Client::~Client() = default;
 
 void Client::run() {
   loadTorrent();
   requestPeers();
   connectToPeers();
+  startAccepting(); // Start listening for inbound connections
+  
+  // Run the Asio event loop, processing all async operations.
+  // This blocks until all work is finished.
+  // (Which should never happen since 
+  // it calls async reads constantly.)
+  std::cout << "\n--- STARTING ASIO EVENT LOOP ---" << std::endl;
+  try {
+    io_context_.run();
+  } catch (const std::exception& e) {
+    std::cerr << "Event loop error: " << e.what() << std::endl;
+  }
+  std::cout << "--- ASIO EVENT LOOP ENDED ---" << std::endl;
 }
 
 void Client::loadTorrent() {
@@ -130,6 +152,41 @@ void Client::loadTorrent() {
 
   // Generate a peer_id
   peerId_ = generatePeerId();
+
+  // Calculate our bitfield size
+  auto& infoVal = torrent_.mainData.at("info")->value;
+  auto* infoDict = std::get_if<BencodeDict>(&infoVal);
+  if (!infoDict) throw std::runtime_error("Invalid info dictionary.");
+
+  auto& piecesVal = infoDict->at("pieces")->value;
+  auto* piecesStr = std::get_if<std::string>(&piecesVal);
+  if (!piecesStr) throw std::runtime_error("Invalid 'pieces' string.");
+
+  // Store the pieces hashes
+  pieceHashes_ = *piecesStr;
+
+  // Each piece has a hash in "pieces" each with length 20
+  // Amount of pieces is length of "pieces" / 20
+  numPieces_ = piecesStr->length() / 20;
+
+  auto& pieceLenVal = infoDict->at("piece length")->value;
+  if (auto* len = std::get_if<long long>(&pieceLenVal)) {
+      pieceLength_ = *len;
+  } else {
+      throw std::runtime_error("Invalid 'piece length'.");
+  }
+  totalLength_ = getTotalLength(*infoDict); 
+  std::cout << "Torrent piece length: " << pieceLength_ << std::endl;
+  std::cout << "Torrent total length: " << totalLength_ << std::endl;
+
+  // Each bit in the bitfield corresponds to a piece being recieved
+  //
+  // Need amount of pieces / 8 (bits in byte) rounded up to hold
+  // trailing bits
+  size_t bitfieldSize = (numPieces_ + 7) / 8; // ceil(numPieces / 8.0)
+
+  // Create and send our bitfield (all zeros, we have no pieces)
+  myBitfield_.resize(bitfieldSize, 0);
 
   // Print the hash
   std::cout << "--- INFO HASH ---" << std::endl;
@@ -206,8 +263,8 @@ void Client::requestPeers() {
     if (respDict->count("peers")) {
       auto& peersVal = respDict->at("peers")->value;
       if (auto* peersStr = std::get_if<std::string>(&peersVal)) {
-        peers_ = parseCompactPeers(*peersStr); // Store peers in member
-        for (const auto& peer : peers_) {
+        trackerPeers_ = parseCompactPeers(*peersStr); // Store peers in member
+        for (const auto& peer : trackerPeers_) {
           std::cout << "Peer: " << peer.ip << ":" << peer.port << std::endl;
         }
       } else {
@@ -220,36 +277,84 @@ void Client::requestPeers() {
 }
 
 void Client::connectToPeers() {
-  if (peers_.empty()) {
+  if (trackerPeers_.empty()) {
     std::cout << "\nNo peers found. Exiting." << std::endl;
     return;
   }
 
-  std::cout << "\n--- CONNECTING TO PEER ---" << std::endl;
-  // Let's try to connect to the first peer in the list
-  const auto& firstPeer = peers_[0];
-  try {
+  std::cout << "\n--- CONNECTING TO PEERS ---" << std::endl;
+
+  // Try to connect to every peer
+  for (const auto& peerInfo : trackerPeers_) {
     // Create the connection object
-    PeerConnection peerConn(io_context_, firstPeer.ip, firstPeer.port);
+    auto peer = std::make_shared<Peer>(io_context_, peerInfo.ip, peerInfo.port);
 
-    // Attempt to connect
-    peerConn.connect();
+    std::cout << "Connecting to " << peerInfo.ip << ":" << peerInfo.port << std::endl;
 
-    // Attempt to handshake
-    std::vector<unsigned char> peerResponseId = peerConn.performHandshake(
-      torrent_.infoHash,
-      peerId_
+    peer->startAsOutbound(
+        torrent_.infoHash,
+        peerId_,
+        pieceLength_,
+        totalLength_,
+        numPieces_,
+        &myBitfield_,
+        &pieceHashes_
     );
 
-    std::cout << "Received peer ID: ";
-    for (unsigned char c : peerResponseId) {
-      if (std::isprint(c)) std::cout << c;
-      else std::cout << '.';
-    }
-    std::cout << std::endl;
-
-  } catch (const std::exception& e) {
-    std::cerr << "Peer connection failed: " << e.what() << std::endl;
+    // Add peer to peer lists
+    activePeers_.push_back(peer);
   }
+
+  std::cout << "--- CONNECTED TO " << activePeers_.size() << " PEERS ---" << std::endl;
 }
 
+/**
+ * @brief Starts the TCP acceptor to listen for new peers (Inbound).
+ */
+void Client::startAccepting() {
+  std::cout << "Waiting for inbound connections..." << std::endl;
+  
+  // Start an asynchronous accept operation.
+  // Completion handler is handleAccept
+  acceptor_.async_accept(
+    [this](const boost::system::error_code& ec, tcp::socket socket) {
+      handleAccept(ec, std::move(socket));
+    }
+  );
+}
+
+/**
+ * @brief Callback function to handle a new inbound peer connection.
+ */
+void Client::handleAccept(const boost::system::error_code& ec, tcp::socket socket) {
+  if (!ec) {
+    std::cout << "\n--- INBOUND CONNECTION from " 
+              << socket.remote_endpoint().address().to_string() 
+              << " ---" << std::endl;
+              
+    // Create a PeerConnection object from the existing socket
+    auto peer = std::make_shared<Peer>(io_context_, std::move(socket));
+
+    // Start the inbound connection process
+    // This will wait for the peer's handshake, then reply
+    peer->startAsInbound(
+          torrent_.infoHash,
+          peerId_,
+          pieceLength_,
+          totalLength_,
+          numPieces_,
+          &myBitfield_,
+          &pieceHashes_
+    );
+
+    // Add peer to peer lists
+    activePeers_.push_back(peer);
+
+  } else {
+    // An error occurred
+    std::cerr << "Acceptor error: " << ec.message() << std::endl;
+  }
+
+  // Listen for the next connection, regardless of what happened
+  startAccepting();
+}

@@ -11,7 +11,7 @@
 /**
  * @brief Holds information for a single peer.
  */
-struct Peer {
+struct PeerInfo {
   std::string ip;
   uint16_t port;
 };
@@ -73,6 +73,6 @@ std::string sendTrackerRequest(const std::string& url);
  * @return A vector of Peer structs.
  * @throws std::runtime_error if the peer string has an invalid length.
  */
-std::vector<Peer> parseCompactPeers(const std::string& peers);
+std::vector<PeerInfo> parseCompactPeers(const std::string& peers);
 
 #endif // TRACKER_H

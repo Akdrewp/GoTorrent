@@ -19,7 +19,7 @@
       ],
       "detail": "Builds the main bittorrent_client executable using the Makefile",
       "options": {
-        "cwd": "${fileDirname}",
+        "cwd": "${workspaceFolder}",
       }
     },
     {
