@@ -1,4 +1,5 @@
 #include "peer.h"
+#include "torrentSession.h" 
 #include <iostream>
 #include <stdexcept>
 #include <cstring> // For memcpy
@@ -37,18 +38,10 @@ Peer::Peer(asio::io_context& io_context, tcp::socket socket)
 void Peer::startAsOutbound(
   const std::vector<unsigned char>& infoHash,
   const std::string& peerId,
-  long long pieceLength, 
-  long long totalLength, 
-  size_t numPieces, 
-  std::vector<uint8_t>* myBitfield,
-  std::string* pieceHashes
+  std::weak_ptr<TorrentSession> session
 ) {
-  // Store torrent info
-  pieceLength_ = pieceLength;
-  totalLength_ = totalLength;
-  numPieces_ = numPieces;
-  myBitfield_ = myBitfield;
-  pieceHashes_ = pieceHashes;
+  // Store the session context
+  session_ = session;
   
   // Create 'this' binding for callbacks
   auto self = shared_from_this();
@@ -76,18 +69,10 @@ void Peer::startAsOutbound(
 void Peer::startAsInbound(
   const std::vector<unsigned char>& infoHash,
   const std::string& peerId,
-  long long pieceLength, 
-  long long totalLength, 
-  size_t numPieces, 
-  std::vector<uint8_t>* myBitfield,
-  std::string* pieceHashes
+  std::weak_ptr<TorrentSession> session
 ) {
-  // Store torrent info
-  pieceLength_ = pieceLength;
-  totalLength_ = totalLength;
-  numPieces_ = numPieces;
-  myBitfield_ = myBitfield;
-  pieceHashes_ = pieceHashes;
+  // Store the session context
+  session_ = session;
 
   auto self = shared_from_this();
   conn_->startAsInbound(
@@ -113,7 +98,7 @@ void Peer::onHandshakeComplete(const boost::system::error_code& ec, std::vector<
   }
 
   std::cout << "[" << ip_ << "] Logic: Handshake complete. Sending bitfield." << std::endl;
-  // @TODO: Store their peerId
+  // @TODO: Store their peerId maybe for console logging
   
   // Now that handshake is done, send our bitfield.
   sendBitfield();
@@ -122,6 +107,16 @@ void Peer::onHandshakeComplete(const boost::system::error_code& ec, std::vector<
 void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<PeerMessage> msg) {
   if (ec) {
     std::cerr << "[" << ip_ << "] Logic: Disconnected (" << ec.message() << ")" << std::endl;
+
+    // If we were working on a piece, release the lock
+    if (auto session = session_.lock()) {
+      if (nextBlockOffset_ > 0 && nextBlockOffset_ < currentPieceBuffer_.size()) {
+        std::cout << "[" << ip_ << "] Disconnected, un-assigning piece " << nextPieceIndex_ << std::endl;
+        session->unassignPiece(nextPieceIndex_);
+      }
+    }
+    return;
+
     // We are disconnected stop
     return;
   }
@@ -138,9 +133,11 @@ void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<
 // --- Message Senders ---
 
 void Peer::sendBitfield() {
-  std::vector<unsigned char> payload(myBitfield_->begin(), myBitfield_->end());
-  conn_->sendMessage(5, payload);
-  std::cout << "[" << ip_ << "] Sent bitfield (" << payload.size() << " bytes)" << std::endl;
+  if (auto session = session_.lock()) {
+    std::vector<unsigned char> payload = session->getBitfield();
+    conn_->sendMessage(5, payload); // ID 5 = bitfield, 
+    std::cout << "[" << ip_ << "] Sent bitfield (" << payload.size() << " bytes)" << std::endl;
+  }
 }
 
 void Peer::sendInterested() {
@@ -174,10 +171,7 @@ void Peer::sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length) {
  * @brief Makes decisions based on the current peer state.
  */
 void Peer::doAction() {
-  // Action 1: Check if we should be interested in this peer.
-  checkAndSendInterested();
-
-  // Action 2: Check if we can and should request pieces (pipelining).
+  // Check if we can and should request pieces (pipelining).
   if (amInterested_ && !peerChoking_) {
     // We are interested, and the peer is not choking us.
     // Fill the request pipeline.
@@ -196,11 +190,10 @@ void Peer::doAction() {
  */
 void Peer::requestPiece() {
 
-  // If the bitfield has not been updated since last failed search
-  // We have searched through the pieces and not found any match
-  if (!bitfieldUpdated_) {
-    std::cout << "[" << ip_ << "] All pieces checked/downloaded, nothing to request." << std::endl;
-    return;
+  // Get session
+  auto session = session_.lock();
+  if (!session) {
+    return; // Session is gone
   }
 
   // Fill the pipeline up to MAX_PIPELINE_SIZE
@@ -209,51 +202,33 @@ void Peer::requestPiece() {
     // If we're not working on a piece (offset is 0),
     // we must find the next available piece to start.
     if (nextBlockOffset_ == 0) {
+      // Get assigned piece from session
+      std::optional<size_t> assignedPiece = session->assignWorkForPeer(shared_from_this());
 
-      bool foundPiece = false;
-      // Search bitfield to find a piece peer has but client doesn't
-      for (size_t i = 0; i < numPieces_; ++i) {
-        if (hasPiece(i) && !clientHasPiece(i)) {
-          // Found piece to request
-          nextPieceIndex_ = i;
-          foundPiece = true;
-          std::cout << "[" << ip_ << "] Found new piece to download: " << nextPieceIndex_ << std::endl;
-
-          // Calculate the true length of this piece
-          /**
-           * New length is size of piece 16KB
-           * 
-           * UNLESS
-           * 
-           * It's last piece in which it is
-           * totalLength_ - totalDownloaded
-           */
-          long long thisPieceLength = pieceLength_;
-          long long totalDownloaded = (long long)nextPieceIndex_ * pieceLength_;
-          if (totalDownloaded + thisPieceLength > totalLength_) {
-              thisPieceLength = totalLength_ - totalDownloaded;
-          }
-          currentPieceBuffer_.resize(thisPieceLength);
-          break;
-        }
+      if (!assignedPiece) {
+        // Session tell us there's no work to be done
+        return; // Stop trying to request
       }
 
-      // If we still haven't found a piece, this peer has nothing
-      // for us.
-      if (!foundPiece) {
-        // We've searched to the end and found nothing.
-        // We set bitfieldUpdated_ to false to not search again
-        bitfieldUpdated_ = false;
-        std::cout << "[" << ip_ << "] Peer has no pieces we need (from " 
-                  << nextPieceIndex_ << " onwards). Waiting." << std::endl;
-        return; // Exit request
+      // We have a piece
+
+      nextPieceIndex_ = *assignedPiece;
+      std::cout << "[" << ip_ << "] Session assigned us piece: " << nextPieceIndex_ << std::endl;
+
+      long long pieceLength = session->getPieceLength();
+      long long totalLength = session->getTotalLength();
+
+      long long thisPieceLength = pieceLength;
+
+      long long totalDownloaded = (long long)nextPieceIndex_ * pieceLength;
+      if (totalDownloaded + thisPieceLength > totalLength) {
+          thisPieceLength = totalLength - totalDownloaded;
       }
+      currentPieceBuffer_.resize(thisPieceLength);
     }
 
     // If we have requested all blocks for this piece
     if (nextBlockOffset_ >= currentPieceBuffer_.size()) {
-      // Update bitfield searched flag
-      bitfieldUpdated_ = false;
       return;
     }
 
@@ -272,8 +247,8 @@ void Peer::requestPiece() {
     uint32_t blockLength = BLOCK_SIZE;
     
     // TODO: Need to handle the last piece/block, which might be shorter.
-    if (nextBlockOffset_ + BLOCK_SIZE > pieceLength_) {
-        blockLength = pieceLength_ - nextBlockOffset_;
+    if (nextBlockOffset_ + BLOCK_SIZE > thisPieceLength) {
+        blockLength = thisPieceLength - nextBlockOffset_;
     }
     
     // Send the request
@@ -299,22 +274,13 @@ void Peer::requestPiece() {
   }
 }
 
-/**
- * @brief Checks if we are interested in the peer and sends an
- * Interested message (ID 2) if we aren't already.
- */
-void Peer::checkAndSendInterested() {
-  if (amInterested_) {
-    return; // Already interested
-  }
-
-  for (size_t i = 0; i < numPieces_; ++i) {
-    if (hasPiece(i) && !clientHasPiece(i)) {
-      std::cout << "[" << ip_ << "] Peer has piece " << i << " which we don't. Sending INTERESTED." << std::endl;
-      sendInterested();
-      amInterested_ = true;
-      return; 
-    }
+void Peer::setAmInterested(bool interested) {
+  if (interested && !amInterested_) {
+    std::cout << "[" << ip_ << "] Session says we are interested. Sending INTERESTED." << std::endl;
+    sendInterested();
+    amInterested_ = true;
+  } else if (!interested && amInterested_) {
+    amInterested_ = false;
   }
 }
 
@@ -366,13 +332,19 @@ void Peer::handleChoke() {
   // A real client might re-queue these.
   // For now, we just clear them.
   if (!inFlightRequests_.empty()) {
-      std::cout << "  Peer choked us, clearing " << inFlightRequests_.size() << " in-flight requests." << std::endl;
-      inFlightRequests_.clear();
-      
-      // We must reset our download position to the start
-      // of the piece we were working on.
-      nextPieceIndex_ = inFlightRequests_[0].pieceIndex;
-      nextBlockOffset_ = inFlightRequests_[0].begin;
+    std::cout << "  Peer choked us, clearing " << inFlightRequests_.size() << " in-flight requests." << std::endl;
+    inFlightRequests_.clear();
+    
+    // We must reset our download position to the start
+    // of the piece we were working on.
+    uint32_t chokedPieceIndex = inFlightRequests_[0].pieceIndex;
+    nextBlockOffset_ = 0; // Reset to 0 so we must re-find a piece
+    inFlightRequests_.clear();
+
+    if (auto session = session_.lock()) {
+      std::cout << "[" << ip_ << "] Choked, un-assigning piece " << chokedPieceIndex << std::endl;
+      session->unassignPiece(chokedPieceIndex);
+    }
   }
 }
 
@@ -407,8 +379,13 @@ void Peer::handleHave(const PeerMessage& msg) {
 
   std::cout << "[" << ip_ << "] Received HAVE for piece " << pieceIndex << std::endl;
   
-  // Set piece in bitfield
+  // Update local bitfield state
   setHavePiece(pieceIndex);
+
+  // Report to session
+  if (auto session = session_.lock()) {
+    session->onHaveReceived(shared_from_this(), pieceIndex);
+  }
 }
 
 /**
@@ -420,8 +397,14 @@ void Peer::handleHave(const PeerMessage& msg) {
  */
 void Peer::handleBitfield(const PeerMessage& msg) {
   std::cout << "[" << ip_ << "] Received BITFIELD (" << msg.payload.size() << " bytes)" << std::endl;
+
+  // Update local bitfield state
   bitfield_ = msg.payload;
-  bitfieldUpdated_ = true;
+
+  // Report to session
+  if (auto session = session_.lock()) {
+    session->onBitfieldReceived(shared_from_this(), msg.payload);
+  }
 }
 
 
@@ -442,8 +425,6 @@ void Peer::setHavePiece(uint32_t pieceIndex) {
   // Set the bit
   bitfield_[byte_index] |= (1 << bit_index);
 
-  // Update bitfield search
-  bitfieldUpdated_ = true;
 }
 
 /**
@@ -522,20 +503,20 @@ void Peer::handlePiece(const PeerMessage& msg) {
 
       if (pieceFinished) {
           std::cout << "  COMPLETED PIECE " << pieceIndex << " (all blocks received)!" << std::endl;
-          
+
+          auto session = session_.lock();
+          if (!session) return; // Session is gone
+
+
           // Verify hash
-          if (verifyPieceHash(pieceIndex)) {
+          if (verifyPieceHash(pieceIndex, session)) {
               std::cout << "  HASH OK for piece " << pieceIndex << "!" << std::endl;
               
               // Set client bitfield
-              size_t my_byte_index = pieceIndex / 8;
-              uint8_t my_bit_index = 7 - (pieceIndex % 8);
-              if (myBitfield_) {
-                  // @TODO: This should be thread-safe if we add multi-threading
-                  (*myBitfield_)[my_byte_index] |= (1 << my_bit_index);
-              }
+              session->updateMyBitfield(pieceIndex);
               
-              // @TODO: Write piece to file
+              // Call write callback
+              session->onPieceCompleted(pieceIndex, currentPieceBuffer_);
               
               // Advance to next piece
               nextBlockOffset_ = 0;
@@ -548,6 +529,9 @@ void Peer::handlePiece(const PeerMessage& msg) {
               nextBlockOffset_ = 0;
               // nextPieceIndex_ remains the same
               currentPieceBuffer_.clear();
+
+              // Unassign piece
+              session->unassignPiece(pieceIndex);
           }
         }
 
@@ -563,37 +547,33 @@ void Peer::handlePiece(const PeerMessage& msg) {
  * @brief Checks if *we* have a specific piece.
  */
 bool Peer::clientHasPiece(size_t pieceIndex) const {
-    if (!myBitfield_) return false; // Not initialized
-
-    size_t byte_index = pieceIndex / 8;
-    uint8_t bit_index = 7 - (pieceIndex % 8);
-
-    if (byte_index >= myBitfield_->size()) {
-        return false; // Should not happen if initialized
-    }
-    return ((*myBitfield_)[byte_index] & (1 << bit_index)) != 0;
+  if (auto session = session_.lock()) {
+    return session->clientHasPiece(pieceIndex);
+  }
+  return false;
 }
 
 /**
  * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
  */
-bool Peer::verifyPieceHash(size_t pieceIndex) {
-    if (!pieceHashes_) {
-        std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, no hashes pointer." << std::endl;
-        return false;
-    }
-    if (currentPieceBuffer_.empty()) {
-        std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, piece buffer is empty." << std::endl;
-        return false;
-    }
-    
-    // Calculate the hash
-    unsigned char calculatedHash[SHA_DIGEST_LENGTH]; // 20 bytes
-    SHA1(currentPieceBuffer_.data(), currentPieceBuffer_.size(), calculatedHash);
-    
-    // Get the expected hash
-    const char* expectedHash = pieceHashes_->data() + (pieceIndex * 20);
-    
-    // Compare
-    return memcmp(calculatedHash, expectedHash, SHA_DIGEST_LENGTH) == 0;
+bool Peer::verifyPieceHash(size_t pieceIndex, std::shared_ptr<TorrentSession> session) {
+  if (!session) {
+    std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, no session." << std::endl;
+    return false;
+  }
+  if (currentPieceBuffer_.empty()) {
+    std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, piece buffer is empty." << std::endl;
+    return false;
+  }
+  
+  unsigned char calculatedHash[SHA_DIGEST_LENGTH]; // 20 bytes
+  SHA1(currentPieceBuffer_.data(), currentPieceBuffer_.size(), calculatedHash);
+  
+  // --- MODIFIED: Get hash from session ---
+  const char* expectedHash = session->getPieceHash(pieceIndex);
+  if (!expectedHash) {
+    return false; // Invalid index
+  }
+  
+  return memcmp(calculatedHash, expectedHash, SHA_DIGEST_LENGTH) == 0;
 }

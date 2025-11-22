@@ -36,6 +36,6 @@ TorrentData parseTorrentFile(const std::string& torrentFilePath);
  * @return The total length of the file(s) in the info dictionary
  * @throws std::runtime_error on incorrect format
  */
-long long getTotalLength(const BencodeDict& infoDict);
+long long getTotalLengthTorrent(const BencodeDict& infoDict);
 
 #endif // TORRENT_H

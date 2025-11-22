@@ -12,6 +12,9 @@
 namespace asio = boost::asio;
 using asio::ip::tcp;
 
+// Forward declaration for TorrentSession defined in TorrentSession.h
+class TorrentSession;
+
 /**
  * @brief Holds info about a block request we are waiting for.
  */
@@ -50,32 +53,20 @@ public:
 
   /**
    * @brief Starts the connection process for an OUTBOUND connection.
-   *
-   * This will connect, handshake, send bitfield, and start the message loop.
    */
   void startAsOutbound(
     const std::vector<unsigned char>& infoHash,
     const std::string& peerId,
-    long long pieceLength, 
-    long long totalLength, 
-    size_t numPieces, 
-    std::vector<uint8_t>* myBitfield,
-    std::string* pieceHashes
+    std::weak_ptr<TorrentSession> session
   );
 
   /**
    * @brief Starts the connection process for an INBOUND connection.
-   *
-   * This will receive a handshake, reply, send bitfield, and start the message loop.
    */
   void startAsInbound(
     const std::vector<unsigned char>& infoHash,
     const std::string& peerId,
-    long long pieceLength, 
-    long long totalLength, 
-    size_t numPieces, 
-    std::vector<uint8_t>* myBitfield,
-    std::string* pieceHashes
+    std::weak_ptr<TorrentSession> session
   );
 
   // --- Message Senders ---
@@ -102,11 +93,13 @@ public:
    */
   void sendBitfield();
 
-  /**
-   * @brief Updates the peer's bitfield to indicate they have a piece.
-   * @param pieceIndex The zero-based index of the piece.
-   */
-  void setHavePiece(uint32_t pieceIndex);
+  void setAmInterested(bool interested);
+
+  // /**
+  //  * @brief Updates the peer's bitfield to indicate they have a piece.
+  //  * @param pieceIndex The zero-based index of the piece.
+  //  */
+  // void setHavePiece(uint32_t pieceIndex);
 
   /**
    * @brief Checks if the peer has a specific piece, based on their bitfield.
@@ -120,9 +113,6 @@ public:
   
   // Proabably need more but the specifications say
   // this should be enough even for more effecient algorithms
-  
-  /** @brief Bitfield of the peer */
-  std::vector<uint8_t> bitfield_;
   
   bool amChoking_ = true;
   bool peerChoking_ = true;
@@ -190,13 +180,13 @@ private:
   // This does the entire loop based on state 
   void doAction();
 
-  /** 
-   * @brief Checks if we are interested in the peer and sends an
-   * Interested message (ID 2) if we aren't already.
-   * 
-   * We are interested if the peer has a piece we don't
-   */
-  void checkAndSendInterested();
+  // /** 
+  //  * @brief Checks if we are interested in the peer and sends an
+  //  * Interested message (ID 2) if we aren't already.
+  //  * 
+  //  * We are interested if the peer has a piece we don't
+  //  */
+  // void checkAndSendInterested();
 
   // --- Helper Functions ---
   
@@ -208,11 +198,11 @@ private:
   bool clientHasPiece(size_t pieceIndex) const;
 
   /**
- * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
- * 
- * @param pieceIndex index of piece to check the hash of
- */
-  bool verifyPieceHash(size_t pieceIndex);
+   * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
+   * 
+   * @param pieceIndex index of piece to check the hash of
+   */
+  bool verifyPieceHash(size_t pieceIndex, std::shared_ptr<TorrentSession> session);
 
   /**
    * @brief Sends a generic message to the peer.
@@ -221,6 +211,13 @@ private:
    */
   void sendMessage(uint8_t id, const std::vector<unsigned char>& payload);
 
+  /**
+   * @brief Sets bit in peer bitfield
+   * 
+   * @param pieceIndex index of piece to set in bitfield
+   */
+  void setHavePiece(uint32_t pieceIndex);
+
   // --- Download State ---
   std::vector<PendingRequest> inFlightRequests_;
   static const int MAX_PIPELINE_SIZE = 5;
@@ -228,21 +225,17 @@ private:
   size_t nextPieceIndex_ = 0;
   uint32_t nextBlockOffset_ = 0;
   std::vector<uint8_t> currentPieceBuffer_;
-  // Whether or not the bitfield has been updated since last action
-  bool bitfieldUpdated_;
 
-  // --- Torrent Info (passed from Client) ---
-  long long pieceLength_ = 0;
-  long long totalLength_ = 0;
-  size_t numPieces_ = 0;
-  std::vector<uint8_t>* myBitfield_; // Pointer to client's bitfield
-  std::string* pieceHashes_;    // Pointer to client's hashes
-  std::vector<unsigned char> infoHash_; 
-  std::string peerId_;
-
-  // --- Asio Variables ---
+  // --- Connection ---
   std::string ip_; // For console logging
   std::shared_ptr<PeerConnection> conn_; // Socket connection layer
+
+  // --- Session ---
+  std::weak_ptr<TorrentSession> session_;
+
+  /** @brief Bitfield of the peer */
+  std::vector<uint8_t> bitfield_;
+
 };
 
 #endif // PEER_H

@@ -2,23 +2,17 @@
 #define CLIENT_H
 
 #include "torrent.h" // For TorrentData
-#include "tracker.h" // For PeerInfo
+#include "torrentSession.h" // For TorrentSession
 #include <boost/asio.hpp>
 #include <boost/asio/ip/tcp.hpp> // For tcp::acceptor
 #include <string>
 #include <vector>
 #include <optional>
 #include <memory>
+#include <set>
 
 namespace asio = boost::asio;
 using asio::ip::tcp;
-
-// Forward declaration defined in peer.h
-class Peer;
-
-// Forward declration defined in peer.h
-struct PeerMessage;
-
 /**
  * @brief Main BitTorrent client class.
  *
@@ -54,24 +48,6 @@ public:
 private: 
 
   /**
-   * @TODO Redo comments for multiple peers
-   */
-  /**
-   * @brief Loads torrent file, parses it, and generates our peer_id.
-   */
-  void loadTorrent();
-
-  /**
-   * @brief Contacts the tracker to get a list of peers.
-   */
-  void requestPeers();
-
-  /**
-   * @brief Attempts to connect to the peers from the peer list.
-   */
-  void connectToPeers();
-
-  /**
    * @brief Starts the TCP acceptor to listen for new peers (Inbound).
    */
   void startAccepting();
@@ -94,18 +70,17 @@ private:
   // --- External Variables ---
   asio::io_context& io_context_;
   std::string torrentFilePath_;
-  
-  TorrentData torrent_;
 
   // --- Server Variables ---
   std::string peerId_;
-  std::vector<PeerInfo> trackerPeers_;
   long long port_;
 
   tcp::acceptor acceptor_;
 
-  // Stores the peers
-  std::vector<std::shared_ptr<Peer>> activePeers_;
+  // Torrent Session mangagement
+  // May eventually have multiple torrent sessions
+  // but one is okay for now
+  std::shared_ptr<TorrentSession> session_; 
 };
 
 #endif // CLIENT_H
