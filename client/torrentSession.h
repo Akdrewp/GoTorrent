@@ -1,6 +1,7 @@
 #ifndef TORRENT_SESSION_H
 #define TORRENT_SESSION_H
 
+#include "iTorrentSession.h"
 #include "torrent.h"
 #include "tracker.h"
 #include "peer.h"
@@ -20,7 +21,7 @@ using asio::ip::tcp;
  * This class orchestrates tracker communication, file management,
  * and peer coordination.
  */
-class TorrentSession : public std::enable_shared_from_this<TorrentSession> {
+class TorrentSession : public ITorrentSession, public std::enable_shared_from_this<TorrentSession> {
 public:
   /**
    * @brief Constructs the TorrentSession.
@@ -49,6 +50,8 @@ public:
    */
   void handleInboundConnection(tcp::socket socket);
 
+  // --- ITorrenSession Implementation
+
   // --- PUBLIC CALLBACKS (called by Peer) ---
 
   void onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data);
@@ -58,7 +61,7 @@ public:
   void unassignPiece(size_t pieceIndex);
   
   // --- PUBLIC GETTERS (called by Peer) ---
-  
+
   long long getPieceLength() const { return pieceLength_; }
   long long getTotalLength() const { return totalLength_; }
   const std::vector<uint8_t>& getBitfield() const { return myBitfield_; }

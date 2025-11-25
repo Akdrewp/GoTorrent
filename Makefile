@@ -18,8 +18,10 @@ CXXFLAGS = -g -Wall -std=c++17
 # cURL
 # boost
 LIBS = -lcrypto -lcurl -lboost_system
-# Add libraries for testing (GoogleTest)
-TEST_LIBS = -lgtest -lgtest_main -pthread
+# Add libraries for testing
+# GoogleTest
+# GoogleMock
+TEST_LIBS = -lgtest -lgtest_main -lgmock -pthread
 
 # 3. Project Structure
 # Add all directories that contain .h files
@@ -38,11 +40,24 @@ TEST_TARGET = test_runner_executable
 # /tracker
 # /client
 # /peer
-CLIENT_SRCS = $(wildcard src/*.cpp) $(wildcard bencode/*.cpp) $(wildcard torrent/*.cpp) $(wildcard tracker/*.cpp) $(wildcard client/*.cpp) $(wildcard peer/*.cpp)
+CLIENT_SRCS = $(wildcard src/*.cpp) \
+              $(wildcard bencode/*.cpp) \
+              $(wildcard torrent/*.cpp) \
+              $(wildcard tracker/*.cpp) \
+              $(wildcard client/*.cpp) \
+              $(wildcard peer/*.cpp)
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 
 # Define source files for the TESTS
-TEST_SRCS = bencode/bencode_test.cpp bencode/bencode.cpp
+TEST_SRCS = bencode/bencode_test.cpp \
+            bencode/bencode.cpp \
+            peer/test/peer_test.cpp \
+            peer/peer.cpp \
+            peer/peerConnection.cpp \
+            client/torrentSession.cpp \
+            tracker/tracker.cpp \
+            torrent/torrent.cpp
+
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 
 # 6. Build Rules
@@ -63,7 +78,7 @@ tests: $(TEST_TARGET)
 
 $(TEST_TARGET): $(TEST_OBJS)
 	@echo "Linking tests: $(TEST_TARGET)..."
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(TEST_LIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(TEST_LIBS) $(LIBS)
 	@echo "Test build complete: ./$(TEST_TARGET)"
 
 # Rule to run the tests (depends on the 'tests' build rule)

@@ -209,6 +209,16 @@ void TorrentSession::requestPeers() {
   }
 }
 
+static std::shared_ptr<Peer> initPeer(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port) {
+  // Create Connection (Transport Layer)
+  auto conn = std::make_shared<PeerConnection>(io_context, peer_ip, peer_port);
+  
+  // Inject Connection into Peer (Logic Layer)
+  auto peer = std::make_shared<Peer>(conn, peer_ip);
+
+  return peer;
+}
+
 void TorrentSession::connectToPeers() {
   if (trackerPeers_.empty()) {
     std::cout << "\nNo peers found from tracker." << std::endl;
@@ -220,8 +230,10 @@ void TorrentSession::connectToPeers() {
 
   // Try to connect to every peer
   for (const auto& peerInfo : trackerPeers_) {
-    // Create the connection object
-    auto peer = std::make_shared<Peer>(io_context_, peerInfo.ip, peerInfo.port);
+
+    // Create peer
+    auto peer = initPeer(io_context_, peerInfo.ip, peerInfo.port);
+
     std::cout << "Attempting async connect to " << peerInfo.ip << ":" << peerInfo.port << std::endl;
 
     // This sends bitfield, waits for reply and completes handshake
@@ -243,12 +255,14 @@ void TorrentSession::handleInboundConnection(tcp::socket socket) {
             << socket.remote_endpoint().address().to_string() 
             << " ---" << std::endl;
   
-  // Create a PeerConnection object from the existing socket
-  auto peer = std::make_shared<Peer>(io_context_, std::move(socket));
-  using namespace std::placeholders; // for _1, _2
+  // Create Connection
+  auto conn = std::make_shared<PeerConnection>(io_context_, std::move(socket));
+  
+  // Create peer
+  auto peer = std::make_shared<Peer>(conn, conn->get_ip());
 
   // Start the inbound connection process
-  // This will wait for the peer's handshake, then reply
+  // This waits for the peer's handshake, then reply
   peer->startAsOutbound(
     torrent_.infoHash,
     peerId_,

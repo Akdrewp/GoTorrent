@@ -31,25 +31,9 @@ class Peer : public std::enable_shared_from_this<Peer> {
 public:
 
   /**
-   * @brief Constructs a peer connection from ip and port
-   * 
-   * This is for OUTBOUND connections (From a peer list)
-   * 
-   * @param io_context The single, shared Asio io_context.
-   * @param peer_ip The IP address of the peer to connect to.
-   * @param peer_port The port of the peer to connect to.
+   * @brief Constructor for peer
    */
-  Peer(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port);
-
-  /**
-   * @brief Constructor a peer connection from an existing socket
-   * 
-   * This is for INBOUND connections
-   * 
-   * @param io_context The single, shared Asio io_context.
-   * @param socket An already-connected socket from a tcp::acceptor.
-   */
-  Peer(asio::io_context& io_context, tcp::socket socket);
+  Peer(std::shared_ptr<PeerConnection> conn, std::string ip);
 
   /**
    * @brief Starts the connection process for an OUTBOUND connection.
@@ -218,6 +202,14 @@ private:
    */
   void setHavePiece(uint32_t pieceIndex);
 
+  /**
+   * @brief Logging functions for the peer
+   * 
+   * @param msg Message to log
+   */
+  void log(const std::string& msg) const;
+  void logError(const std::string& msg) const;
+
   // --- Download State ---
   std::vector<PendingRequest> inFlightRequests_;
   static const int MAX_PIPELINE_SIZE = 5;
@@ -227,8 +219,8 @@ private:
   std::vector<uint8_t> currentPieceBuffer_;
 
   // --- Connection ---
-  std::string ip_; // For console logging
   std::shared_ptr<PeerConnection> conn_; // Socket connection layer
+  std::string ip_; // For console logging
 
   // --- Session ---
   std::weak_ptr<TorrentSession> session_;

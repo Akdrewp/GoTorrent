@@ -11,21 +11,21 @@
 static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
 
 /**
- * @brief Constructor for OUTBOUND connections.
+ * @brief Constructor for a peer
  */
-Peer::Peer(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port)
-  : ip_(peer_ip),
-    conn_(std::make_shared<PeerConnection>(io_context, peer_ip, peer_port))
+Peer::Peer(std::shared_ptr<PeerConnection> conn, std::string ip)
+  : conn_(std::move(conn)), ip_(std::move(ip))
 {
 }
 
-/**
- * @brief Constructor for INBOUND connections.
- */
-Peer::Peer(asio::io_context& io_context, tcp::socket socket)
-  : ip_(socket.remote_endpoint().address().to_string()),
-    conn_(std::make_shared<PeerConnection>(io_context, std::move(socket)))
-{
+// --- Logging helpers ---
+
+void Peer::log(const std::string& msg) const {
+    std::cout << "[" << ip_ << "] " << msg << std::endl;
+}
+
+void Peer::logError(const std::string& msg) const {
+    std::cerr << "[" << ip_ << "] " << msg << std::endl;
 }
 
 // --- STARTUP LOGIC ---
@@ -92,12 +92,12 @@ void Peer::startAsInbound(
 
 void Peer::onHandshakeComplete(const boost::system::error_code& ec, std::vector<unsigned char> peerId) {
   if (ec) {
-    std::cerr << "[" << ip_ << "] Logic: Handshake failed." << std::endl;
+    logError("Logic: Handshake failed.");
     // Connection is already closed by PeerConnection. We just stop.
     return;
   }
 
-  std::cout << "[" << ip_ << "] Logic: Handshake complete. Sending bitfield." << std::endl;
+  log("Logic: Handshake complete. Sending bitfield.");
   // @TODO: Store their peerId maybe for console logging
   
   // Now that handshake is done, send our bitfield.
@@ -106,12 +106,12 @@ void Peer::onHandshakeComplete(const boost::system::error_code& ec, std::vector<
 
 void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<PeerMessage> msg) {
   if (ec) {
-    std::cerr << "[" << ip_ << "] Logic: Disconnected (" << ec.message() << ")" << std::endl;
+    logError("Logic: Disconnected (" + ec.message() + ")");
 
     // If we were working on a piece, release the lock
     if (auto session = session_.lock()) {
       if (nextBlockOffset_ > 0 && nextBlockOffset_ < currentPieceBuffer_.size()) {
-        std::cout << "[" << ip_ << "] Disconnected, un-assigning piece " << nextPieceIndex_ << std::endl;
+        log("Disconnected, un-assigning piece " + std::to_string(nextPieceIndex_));
         session->unassignPiece(nextPieceIndex_);
       }
     }
@@ -136,7 +136,7 @@ void Peer::sendBitfield() {
   if (auto session = session_.lock()) {
     std::vector<unsigned char> payload = session->getBitfield();
     conn_->sendMessage(5, payload); // ID 5 = bitfield, 
-    std::cout << "[" << ip_ << "] Sent bitfield (" << payload.size() << " bytes)" << std::endl;
+    log("Sent bitfield (" + std::to_string(payload.size()) + " bytes)");
   }
 }
 
@@ -213,7 +213,7 @@ void Peer::requestPiece() {
       // We have a piece
 
       nextPieceIndex_ = *assignedPiece;
-      std::cout << "[" << ip_ << "] Session assigned us piece: " << nextPieceIndex_ << std::endl;
+      log("Session assigned us piece: " + std::to_string(nextPieceIndex_));
 
       long long pieceLength = session->getPieceLength();
       long long totalLength = session->getTotalLength();
@@ -276,7 +276,7 @@ void Peer::requestPiece() {
 
 void Peer::setAmInterested(bool interested) {
   if (interested && !amInterested_) {
-    std::cout << "[" << ip_ << "] Session says we are interested. Sending INTERESTED." << std::endl;
+    log("Session says we are interested. Sending INTERESTED.");
     sendInterested();
     amInterested_ = true;
   } else if (!interested && amInterested_) {
@@ -309,7 +309,7 @@ void Peer::handleMessage(PeerMessage msg) {
     // piece: <len=0009+X><id=7><index><begin><block>
     case 7: handlePiece(msg); break;
     default:
-      std::cout << "[" << ip_ << "] Received unhandled message. ID: " << (int)msg.id << std::endl;
+      log("Received unhandled message. ID: " + std::to_string((int)msg.id));
   }
 }
 
@@ -325,14 +325,14 @@ void Peer::handleMessage(PeerMessage msg) {
  * Any existing messages should be considered to be discarded
  */
 void Peer::handleChoke() {
-  std::cout << "[" << ip_ << "] Received CHOKE" << std::endl;
+  log("Received CHOKE");
   peerChoking_ = true;
 
   // If we had requests pending, they are now dead.
   // A real client might re-queue these.
   // For now, we just clear them.
   if (!inFlightRequests_.empty()) {
-    std::cout << "  Peer choked us, clearing " << inFlightRequests_.size() << " in-flight requests." << std::endl;
+    log("Peer choked us, clearing requests.");
     inFlightRequests_.clear();
     
     // We must reset our download position to the start
@@ -342,7 +342,7 @@ void Peer::handleChoke() {
     inFlightRequests_.clear();
 
     if (auto session = session_.lock()) {
-      std::cout << "[" << ip_ << "] Choked, un-assigning piece " << chokedPieceIndex << std::endl;
+      log("Choked, un-assigning piece" + std::to_string(chokedPieceIndex));
       session->unassignPiece(chokedPieceIndex);
     }
   }
@@ -356,7 +356,7 @@ void Peer::handleChoke() {
  * An unchoke message means a peer is ready to recieve messages
  */
 void Peer::handleUnchoke() {
-  std::cout << "[" << ip_ << "] Received UNCHOKE" << std::endl;
+  log("Received UNCHOKE");
   peerChoking_ = false;
 }
 
@@ -369,7 +369,7 @@ void Peer::handleUnchoke() {
  */
 void Peer::handleHave(const PeerMessage& msg) {
   if (msg.payload.size() != 4) {
-    std::cerr << "[" << ip_ << "] Invalid HAVE message payload size: " << msg.payload.size() << std::endl;
+    logError("Invalid HAVE message payload size: "+ std::to_string(msg.payload.size()));
     return;
   }
   
@@ -377,7 +377,7 @@ void Peer::handleHave(const PeerMessage& msg) {
   memcpy(&pieceIndex, msg.payload.data(), 4);
   pieceIndex = ntohl(pieceIndex);
 
-  std::cout << "[" << ip_ << "] Received HAVE for piece " << pieceIndex << std::endl;
+  log("Received HAVE for piece " + std::to_string(pieceIndex));
   
   // Update local bitfield state
   setHavePiece(pieceIndex);
@@ -396,7 +396,7 @@ void Peer::handleHave(const PeerMessage& msg) {
  * A have message means this peer has this signified piece
  */
 void Peer::handleBitfield(const PeerMessage& msg) {
-  std::cout << "[" << ip_ << "] Received BITFIELD (" << msg.payload.size() << " bytes)" << std::endl;
+  log("Received BITFIELD (" + std::to_string(msg.payload.size()) + " bytes)");
 
   // Update local bitfield state
   bitfield_ = msg.payload;
@@ -448,8 +448,8 @@ bool Peer::hasPiece(uint32_t pieceIndex) const {
 
 void Peer::handlePiece(const PeerMessage& msg) {
     if (msg.payload.size() < 8) {
-        std::cerr << "[" << ip_ << "] Invalid PIECE message payload size: " << msg.payload.size() << std::endl;
-        return;
+      logError("Invalid PIECE message payload size: " + std::to_string(msg.payload.size()));
+      return;
     }
 
     // Copy data and convert to host byte order
@@ -460,10 +460,9 @@ void Peer::handlePiece(const PeerMessage& msg) {
     begin = ntohl(begin);
     size_t blockLength = msg.payload.size() - 8;
 
-
-    std::cout << "[" << ip_ << "] Received PIECE: Index=" << pieceIndex 
-              << ", Begin=" << begin
-              << ", Length=" << blockLength << std::endl;
+    log("Received PIECE: Index=" + std::to_string(pieceIndex));
+    log(", Begin=" + std::to_string(begin));
+    log(", Length=" + std::to_string(blockLength));
 
     // Find this block from our in-flight list
     // @todo change inFlightRequests to requestsBuffer
@@ -480,12 +479,13 @@ void Peer::handlePiece(const PeerMessage& msg) {
 
       // Save the block data into our piece buffer
       if (pieceIndex == nextPieceIndex_ && (begin + blockLength) <= currentPieceBuffer_.size()) {
-          const unsigned char* blockData = msg.payload.data() + 8;
-          memcpy(&currentPieceBuffer_[begin], blockData, blockLength);
-          std::cout << "  Saved " << blockLength << " bytes to piece buffer." << std::endl;
+        const unsigned char* blockData = msg.payload.data() + 8;
+        memcpy(&currentPieceBuffer_[begin], blockData, blockLength);
+        log("  Saved " + std::to_string(blockLength) + " bytes to piece buffer.");
       } else {
-          std::cout << "  WARNING: Received piece data for wrong piece/offset. Discarding." << std::endl;
-          return;
+
+        log("  WARNING: Received piece data for wrong piece/offset. Discarding.");
+        return;
       }
 
       // Check if this piece is now complete
@@ -502,41 +502,41 @@ void Peer::handlePiece(const PeerMessage& msg) {
       }
 
       if (pieceFinished) {
-          std::cout << "  COMPLETED PIECE " << pieceIndex << " (all blocks received)!" << std::endl;
+        log("COMPLETED PIECE " + std::to_string(pieceIndex) + " (all blocks received)!");
 
-          auto session = session_.lock();
-          if (!session) return; // Session is gone
+        auto session = session_.lock();
+        if (!session) return; // Session is gone
 
 
-          // Verify hash
-          if (verifyPieceHash(pieceIndex, session)) {
-              std::cout << "  HASH OK for piece " << pieceIndex << "!" << std::endl;
-              
-              // Set client bitfield
-              session->updateMyBitfield(pieceIndex);
-              
-              // Call write callback
-              session->onPieceCompleted(pieceIndex, currentPieceBuffer_);
-              
-              // Advance to next piece
-              nextBlockOffset_ = 0;
-              nextPieceIndex_++;
-              currentPieceBuffer_.clear();
+        // Verify hash
+        if (verifyPieceHash(pieceIndex, session)) {
+          log("HASH OK for piece" + std::to_string(pieceIndex));
+          
+          // Set client bitfield
+          session->updateMyBitfield(pieceIndex);
+          
+          // Call write callback
+          session->onPieceCompleted(pieceIndex, currentPieceBuffer_);
+          
+          // Advance to next piece
+          nextBlockOffset_ = 0;
+          nextPieceIndex_++;
+          currentPieceBuffer_.clear();
 
-          } else {
-              std::cout << "  *** HASH FAILED for piece " << pieceIndex << " ***" << std::endl;
-              // Discard data and reset to re-download this piece
-              nextBlockOffset_ = 0;
-              // nextPieceIndex_ remains the same
-              currentPieceBuffer_.clear();
+        } else {
+          logError("*** HASH FAILED *** for piece " + std::to_string(pieceIndex));
+          // Discard data and reset to re-download this piece
+          nextBlockOffset_ = 0;
+          // nextPieceIndex_ remains the same
+          currentPieceBuffer_.clear();
 
-              // Unassign piece
-              session->unassignPiece(pieceIndex);
-          }
+          // Unassign piece
+          session->unassignPiece(pieceIndex);
         }
+      }
 
     } else {
-        std::cout << "  WARNING: Received a PIECE that doesn't match any request." << std::endl;
+      log("  WARNING: Received a PIECE that doesn't match any request.");
     }
 }
 
@@ -558,11 +558,11 @@ bool Peer::clientHasPiece(size_t pieceIndex) const {
  */
 bool Peer::verifyPieceHash(size_t pieceIndex, std::shared_ptr<TorrentSession> session) {
   if (!session) {
-    std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, no session." << std::endl;
+    logError("ERROR: Cannot verify hash, no session.");
     return false;
   }
   if (currentPieceBuffer_.empty()) {
-    std::cerr << "[" << ip_ << "] ERROR: Cannot verify hash, piece buffer is empty." << std::endl;
+    logError("ERROR: Cannot verify hash, piece buffer is empty.");
     return false;
   }
   
