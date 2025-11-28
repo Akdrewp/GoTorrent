@@ -37,10 +37,10 @@
       "request": "launch",
       // This is the FIX: The program to debug is the executable,
       // not the "run" target.
-      "program": "${fileDirname}/test_runner_executable",
+      "program": "${workspaceFolder}/test_runner_executable",
       "args": [],
       "stopAtEntry": false,
-      "cwd": "${fileDirname}",
+      "cwd": "${workspaceFolder}",
       "environment": [],
       "externalConsole": false,
       "MIMode": "gdb",

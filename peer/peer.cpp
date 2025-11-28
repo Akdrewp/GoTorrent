@@ -1,5 +1,5 @@
 #include "peer.h"
-#include "torrentSession.h" 
+#include "ITorrentSession.h" 
 #include <iostream>
 #include <stdexcept>
 #include <cstring> // For memcpy
@@ -38,13 +38,13 @@ void Peer::logError(const std::string& msg) const {
 void Peer::startAsOutbound(
   const std::vector<unsigned char>& infoHash,
   const std::string& peerId,
-  std::weak_ptr<TorrentSession> session
+  std::weak_ptr<ITorrentSession> session
 ) {
   // Store the session context
   session_ = session;
   
   // Create 'this' binding for callbacks
-  auto self = shared_from_this();
+  std::weak_ptr<Peer> self = shared_from_this();
   
   // Start the TRANSPORT layer's connection process
   conn_->startAsOutbound(
@@ -69,12 +69,12 @@ void Peer::startAsOutbound(
 void Peer::startAsInbound(
   const std::vector<unsigned char>& infoHash,
   const std::string& peerId,
-  std::weak_ptr<TorrentSession> session
+  std::weak_ptr<ITorrentSession> session
 ) {
   // Store the session context
   session_ = session;
 
-  auto self = shared_from_this();
+  std::weak_ptr<Peer> self = shared_from_this();
   conn_->startAsInbound(
     infoHash,
     peerId,
@@ -179,14 +179,100 @@ void Peer::doAction() {
   }
 }
 
+// --- requestPiece ---
+
 /**
- * @brief Fills the request pipeline using the "First Available" strategy.
+ * @brief Helper for requestPiece
+ * 
+ * Gets a new piece from session and resizes the buffer accordingly
+ * 
+ * @param session The session object
+ */
+bool Peer::assignNewPiece(std::shared_ptr<ITorrentSession> session) {
+  // Get assigned piece from session
+  std::optional<size_t> assignedPiece = session->assignWorkForPeer(shared_from_this());
+
+  if (!assignedPiece) {
+    // Session tell us there's no work to be done
+    return false; // Stop trying to request
+  }
+
+  // We have a piece
+
+  nextPieceIndex_ = *assignedPiece;
+  log("Session assigned us piece: " + std::to_string(nextPieceIndex_));
+
+  long long pieceLength = session->getPieceLength();
+  long long totalLength = session->getTotalLength();
+
+  long long thisPieceLength = pieceLength;
+
+  long long totalDownloaded = (long long)nextPieceIndex_ * pieceLength;
+
+  // Verify piece is inbounds
+  if (totalDownloaded >= totalLength) {
+    std::string err = "Critical: Assigned piece index " + std::to_string(nextPieceIndex_) + 
+                      " starts at " + std::to_string(totalDownloaded) + 
+                      " which is >= total length " + std::to_string(totalLength);
+    logError(err);
+    throw std::runtime_error(err);
+  }
+
+  if (totalDownloaded + thisPieceLength > totalLength) {
+      thisPieceLength = totalLength - totalDownloaded;
+  }
+  currentPieceBuffer_.resize(thisPieceLength);
+
+  return true;
+}
+
+/**
+ * @brief Helper for requestPiece
+ * 
+ * Sends a request for the next block in the piece
+ * 
+ * @param pieceLength The length of the current assigned piece
+ */
+void Peer::requestNextBlock(long long pieceLength) {
+  // Client have a piece to download
+  uint32_t blockLength = BLOCK_SIZE;
+  
+  // TODO: Need to handle the last piece/block, which might be shorter.
+  if (nextBlockOffset_ + BLOCK_SIZE > pieceLength) {
+      blockLength = pieceLength - nextBlockOffset_;
+  }
+  
+  // Send the request
+  std::cout << "[" << ip_ << "] --- ACTION: Requesting piece " << nextPieceIndex_ 
+            << ", Block offset " << nextBlockOffset_ << " ---" << std::endl;
+            
+  sendRequest(
+      static_cast<uint32_t>(nextPieceIndex_), // pieceIndex
+      nextBlockOffset_,                      // begin
+      blockLength                            // length
+  );
+
+  // Add this to our in-flight list
+  inFlightRequests_.push_back(PendingRequest{
+      static_cast<uint32_t>(nextPieceIndex_),
+      nextBlockOffset_,
+      blockLength
+  });
+
+  // Advance to the next block
+  nextBlockOffset_ += blockLength;
+}
+
+/**
+ * @brief Fills the request pipeline for the current piece
+ * 
+ * If there is no current piece asks session to assign one
  *
  * It finds the first piece the peer has that we don't,
  * and then requests all blocks for that piece.
  * 
- * @todo Should be using "Rarest first" but that requires 
- * coordinating nodes
+ * Filling up the request pipeline
+ * 
  */
 void Peer::requestPiece() {
 
@@ -200,34 +286,14 @@ void Peer::requestPiece() {
   while (inFlightRequests_.size() < MAX_PIPELINE_SIZE) {
     
     // If we're not working on a piece (offset is 0),
-    // we must find the next available piece to start.
+    // must find a new piece
     if (nextBlockOffset_ == 0) {
-      // Get assigned piece from session
-      std::optional<size_t> assignedPiece = session->assignWorkForPeer(shared_from_this());
-
-      if (!assignedPiece) {
-        // Session tell us there's no work to be done
-        return; // Stop trying to request
+      if (!assignNewPiece(session)) {
+        return; // Session gave no piece
       }
-
-      // We have a piece
-
-      nextPieceIndex_ = *assignedPiece;
-      log("Session assigned us piece: " + std::to_string(nextPieceIndex_));
-
-      long long pieceLength = session->getPieceLength();
-      long long totalLength = session->getTotalLength();
-
-      long long thisPieceLength = pieceLength;
-
-      long long totalDownloaded = (long long)nextPieceIndex_ * pieceLength;
-      if (totalDownloaded + thisPieceLength > totalLength) {
-          thisPieceLength = totalLength - totalDownloaded;
-      }
-      currentPieceBuffer_.resize(thisPieceLength);
     }
 
-    // If we have requested all blocks for this piece
+    // We have requested all blocks for this piece
     if (nextBlockOffset_ >= currentPieceBuffer_.size()) {
       return;
     }
@@ -243,34 +309,8 @@ void Peer::requestPiece() {
     // If we're here, nextPieceIndex_ is set to a piece that
     // the peer has and we don't.
     
-    // Client have a piece to download
-    uint32_t blockLength = BLOCK_SIZE;
-    
-    // TODO: Need to handle the last piece/block, which might be shorter.
-    if (nextBlockOffset_ + BLOCK_SIZE > thisPieceLength) {
-        blockLength = thisPieceLength - nextBlockOffset_;
-    }
-    
-    // Send the request
-    std::cout << "[" << ip_ << "] --- ACTION: Requesting piece " << nextPieceIndex_ 
-              << ", Block offset " << nextBlockOffset_ << " ---" << std::endl;
-              
-    sendRequest(
-        static_cast<uint32_t>(nextPieceIndex_), // pieceIndex
-        nextBlockOffset_,                      // begin
-        blockLength                            // length
-    );
-
-    // Add this to our in-flight list
-    inFlightRequests_.push_back(PendingRequest{
-        static_cast<uint32_t>(nextPieceIndex_),
-        nextBlockOffset_,
-        blockLength
-    });
-
-    // Advance to the next block
-    nextBlockOffset_ += blockLength;
-    
+    requestNextBlock(thisPieceLength);
+  
   }
 }
 
@@ -328,23 +368,17 @@ void Peer::handleChoke() {
   log("Received CHOKE");
   peerChoking_ = true;
 
-  // If we had requests pending, they are now dead.
-  // A real client might re-queue these.
-  // For now, we just clear them.
+  // Clear the requests and reset block offset
   if (!inFlightRequests_.empty()) {
     log("Peer choked us, clearing requests.");
+
+    int inFlightRequestCount = inFlightRequests_.size();
     inFlightRequests_.clear();
     
-    // We must reset our download position to the start
-    // of the piece we were working on.
+    // Reset position to last recieved piece
     uint32_t chokedPieceIndex = inFlightRequests_[0].pieceIndex;
-    nextBlockOffset_ = 0; // Reset to 0 so we must re-find a piece
-    inFlightRequests_.clear();
+    nextBlockOffset_ = nextBlockOffset_ - (inFlightRequestCount * BLOCK_SIZE);
 
-    if (auto session = session_.lock()) {
-      log("Choked, un-assigning piece" + std::to_string(chokedPieceIndex));
-      session->unassignPiece(chokedPieceIndex);
-    }
   }
 }
 
@@ -556,7 +590,7 @@ bool Peer::clientHasPiece(size_t pieceIndex) const {
 /**
  * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
  */
-bool Peer::verifyPieceHash(size_t pieceIndex, std::shared_ptr<TorrentSession> session) {
+bool Peer::verifyPieceHash(size_t pieceIndex, std::shared_ptr<ITorrentSession> session) {
   if (!session) {
     logError("ERROR: Cannot verify hash, no session.");
     return false;

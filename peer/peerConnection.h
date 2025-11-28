@@ -54,12 +54,14 @@ public:
    */
   PeerConnection(asio::io_context& io_context, tcp::socket socket);
 
+  virtual ~PeerConnection() = default;
+
   /**
    * @brief Starts the connection process for an OUTBOUND connection.
    *
    * This will connect, and send handshake
    */
-  void startAsOutbound(
+  virtual void startAsOutbound(
     const std::vector<unsigned char>& infoHash,
     const std::string& peerId,
     HandshakeCallback handshakeHandler,
@@ -71,7 +73,7 @@ public:
    *
    * This will receive a handshake, and reply using handshakeHandler
    */
-  void startAsInbound(
+  virtual void startAsInbound(
     const std::vector<unsigned char>& infoHash,
     const std::string& peerId,
     HandshakeCallback handshakeHandler,
@@ -91,12 +93,12 @@ public:
    * @param id id of the message to send
    * @param payload The payload of the message
    */
-  void sendMessage(uint8_t id, const std::vector<unsigned char>& payload);
+  virtual void sendMessage(uint8_t id, const std::vector<unsigned char>& payload);
 
   /**
    * @brief Closes the connection by closing the socket and stopping the timer
    */
-  void close(const boost::system::error_code& ec = {});
+  virtual void close(const boost::system::error_code& ec = {});
 
   /**
    * @brief Gets the IP address of the remote peer (for logging).

@@ -37,7 +37,7 @@
       ],
       "detail": "Builds the run_tests executable",
       "options": {
-        "cwd": "${fileDirname}",
+        "cwd": "${workspaceFolder}",
       }
     },
     {

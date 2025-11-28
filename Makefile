@@ -49,7 +49,7 @@ CLIENT_SRCS = $(wildcard src/*.cpp) \
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 
 # Define source files for the TESTS
-TEST_SRCS = bencode/bencode_test.cpp \
+TEST_SRCS = bencode/test/bencode_test.cpp \
             bencode/bencode.cpp \
             peer/test/peer_test.cpp \
             peer/peer.cpp \

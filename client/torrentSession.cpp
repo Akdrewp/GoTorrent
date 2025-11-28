@@ -209,6 +209,8 @@ void TorrentSession::requestPeers() {
   }
 }
 
+// --- connectToPeers ---
+
 static std::shared_ptr<Peer> initPeer(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port) {
   // Create Connection (Transport Layer)
   auto conn = std::make_shared<PeerConnection>(io_context, peer_ip, peer_port);

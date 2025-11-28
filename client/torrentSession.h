@@ -1,7 +1,7 @@
 #ifndef TORRENT_SESSION_H
 #define TORRENT_SESSION_H
 
-#include "iTorrentSession.h"
+#include "ITorrentSession.h"
 #include "torrent.h"
 #include "tracker.h"
 #include "peer.h"

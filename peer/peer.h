@@ -12,8 +12,8 @@
 namespace asio = boost::asio;
 using asio::ip::tcp;
 
-// Forward declaration for TorrentSession defined in TorrentSession.h
-class TorrentSession;
+// Forward declaration for ITorrentSession defined in ITorrentSession.h
+class ITorrentSession;
 
 /**
  * @brief Holds info about a block request we are waiting for.
@@ -41,7 +41,7 @@ public:
   void startAsOutbound(
     const std::vector<unsigned char>& infoHash,
     const std::string& peerId,
-    std::weak_ptr<TorrentSession> session
+    std::weak_ptr<ITorrentSession> session
   );
 
   /**
@@ -50,7 +50,7 @@ public:
   void startAsInbound(
     const std::vector<unsigned char>& infoHash,
     const std::string& peerId,
-    std::weak_ptr<TorrentSession> session
+    std::weak_ptr<ITorrentSession> session
   );
 
   // --- Message Senders ---
@@ -76,6 +76,11 @@ public:
    * @brief Sends a Bitfield message (ID 5).
    */
   void sendBitfield();
+
+  /**
+   * @brief 
+   */  
+  void doAction();
 
   void setAmInterested(bool interested);
 
@@ -160,10 +165,6 @@ private:
    */
   void requestPiece();
 
-  // Make better description.
-  // This does the entire loop based on state 
-  void doAction();
-
   // /** 
   //  * @brief Checks if we are interested in the peer and sends an
   //  * Interested message (ID 2) if we aren't already.
@@ -173,6 +174,24 @@ private:
   // void checkAndSendInterested();
 
   // --- Helper Functions ---
+
+  /**
+   * @brief Helper for requestPiece
+   * 
+   * Assigns this peer a piece
+   * 
+   * @param session The session object
+   */
+  bool assignNewPiece(std::shared_ptr<ITorrentSession> session);
+
+  /**
+   * @brief Helper for requestPiece
+   * 
+   * Requests the next block in the piece
+   * 
+   * @param pieceLength The length of the current assigned piece
+   */
+  void requestNextBlock(long long pieceLength);
   
   /**
    * @brief Checks whether the client has the piece of pieceIndex in their bitfield
@@ -186,7 +205,7 @@ private:
    * 
    * @param pieceIndex index of piece to check the hash of
    */
-  bool verifyPieceHash(size_t pieceIndex, std::shared_ptr<TorrentSession> session);
+  bool verifyPieceHash(size_t pieceIndex, std::shared_ptr<ITorrentSession> session);
 
   /**
    * @brief Sends a generic message to the peer.
@@ -210,6 +229,8 @@ private:
   void log(const std::string& msg) const;
   void logError(const std::string& msg) const;
 
+  // --- Helper Functions End ---
+
   // --- Download State ---
   std::vector<PendingRequest> inFlightRequests_;
   static const int MAX_PIPELINE_SIZE = 5;
@@ -223,7 +244,7 @@ private:
   std::string ip_; // For console logging
 
   // --- Session ---
-  std::weak_ptr<TorrentSession> session_;
+  std::weak_ptr<ITorrentSession> session_;
 
   /** @brief Bitfield of the peer */
   std::vector<uint8_t> bitfield_;
