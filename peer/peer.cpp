@@ -289,7 +289,8 @@ void Peer::requestPiece() {
     // must find a new piece
     if (nextBlockOffset_ == 0) {
       if (!assignNewPiece(session)) {
-        return; // Session gave no piece
+        setAmInterested(false); // Session gave no piece no longer interesting
+        return;
       }
     }
 
@@ -376,7 +377,6 @@ void Peer::handleChoke() {
     inFlightRequests_.clear();
     
     // Reset position to last recieved piece
-    uint32_t chokedPieceIndex = inFlightRequests_[0].pieceIndex;
     nextBlockOffset_ = nextBlockOffset_ - (inFlightRequestCount * BLOCK_SIZE);
 
   }
@@ -480,98 +480,110 @@ bool Peer::hasPiece(uint32_t pieceIndex) const {
   return (bitfield_[byte_index] & (1 << bit_index)) != 0;
 }
 
+// --- handlePiece ---
+
+bool Peer::saveBlockToBuffer(uint32_t pieceIndex, uint32_t begin, const std::vector<unsigned char>& payload) {
+  size_t blockLength = payload.size() - 8;
+  
+  if (pieceIndex == nextPieceIndex_ && (begin + blockLength) <= currentPieceBuffer_.size()) {
+    const unsigned char* blockData = payload.data() + 8;
+    memcpy(&currentPieceBuffer_[begin], blockData, blockLength);
+    log("   Saved " + std::to_string(blockLength) + " bytes to piece buffer.");
+    return true;
+  } else {
+    log("   WARNING: Received piece data for wrong piece/offset. Discarding.");
+    return false;
+  }
+}
+
+void Peer::completePiece(uint32_t pieceIndex) {
+  log("COMPLETED PIECE " + std::to_string(pieceIndex) + " (all blocks received)!");
+
+  auto session = session_.lock();
+  if (!session) return; 
+
+  // Verify hash
+  if (verifyPieceHash(pieceIndex, session)) {
+    log("HASH OK for piece " + std::to_string(pieceIndex));
+    
+    // Set client bitfield
+    session->updateMyBitfield(pieceIndex);
+    
+    // Call write callback
+    session->onPieceCompleted(pieceIndex, currentPieceBuffer_);
+    
+    // Advance to next piece (Reset state)
+    nextBlockOffset_ = 0;
+    nextPieceIndex_++;
+    currentPieceBuffer_.clear();
+
+
+  } else {
+    logError("*** HASH FAILED *** for piece " + std::to_string(pieceIndex));
+    // Discard data and reset to re-download this piece
+    nextBlockOffset_ = 0;
+    currentPieceBuffer_.clear();
+
+    // Unassign piece so others can grab it (or we grab it again later)
+    session->unassignPiece(pieceIndex);
+  }
+}
+
 void Peer::handlePiece(const PeerMessage& msg) {
-    if (msg.payload.size() < 8) {
-      logError("Invalid PIECE message payload size: " + std::to_string(msg.payload.size()));
-      return;
-    }
+  if (msg.payload.size() < 8) {
+    logError("Invalid PIECE message payload size: " + std::to_string(msg.payload.size()));
+    return;
+  }
 
-    // Copy data and convert to host byte order
-    uint32_t pieceIndex, begin;
-    memcpy(&pieceIndex, msg.payload.data(), 4);
-    memcpy(&begin, msg.payload.data() + 4, 4);
-    pieceIndex = ntohl(pieceIndex);
-    begin = ntohl(begin);
-    size_t blockLength = msg.payload.size() - 8;
+  // Copy data and convert to host byte order
+  uint32_t pieceIndex, begin;
+  memcpy(&pieceIndex, msg.payload.data(), 4);
+  memcpy(&begin, msg.payload.data() + 4, 4);
+  pieceIndex = ntohl(pieceIndex);
+  begin = ntohl(begin);
+  size_t blockLength = msg.payload.size() - 8;
 
-    log("Received PIECE: Index=" + std::to_string(pieceIndex));
-    log(", Begin=" + std::to_string(begin));
-    log(", Length=" + std::to_string(blockLength));
+  log("Received PIECE: Index=" + std::to_string(pieceIndex));
+  log("Begin=" + std::to_string(begin));
+  log("Length=" + std::to_string(blockLength));
 
-    // Find this block from our in-flight list
-    // @todo change inFlightRequests to requestsBuffer
-    auto it = std::find_if(inFlightRequests_.begin(), inFlightRequests_.end(), 
-        [pieceIndex, begin, blockLength](const PendingRequest& req) {
-            return req.pieceIndex == pieceIndex && 
-                   req.begin == begin && 
-                   req.length == blockLength;
-        });
+  // Find this block from our in-flight list
+  auto it = std::find_if(inFlightRequests_.begin(), inFlightRequests_.end(), 
+      [pieceIndex, begin, blockLength](const PendingRequest& req) {
+          return req.pieceIndex == pieceIndex && 
+                  req.begin == begin && 
+                  req.length == blockLength;
+      });
 
-    if (it != inFlightRequests_.end()) {
-      // Remove from buffer
-      inFlightRequests_.erase(it);
+  if (it == inFlightRequests_.end()) {
+    logError("  ERROR: Received a PIECE that doesn't match any request.");
+    return;
+  }
 
-      // Save the block data into our piece buffer
-      if (pieceIndex == nextPieceIndex_ && (begin + blockLength) <= currentPieceBuffer_.size()) {
-        const unsigned char* blockData = msg.payload.data() + 8;
-        memcpy(&currentPieceBuffer_[begin], blockData, blockLength);
-        log("  Saved " + std::to_string(blockLength) + " bytes to piece buffer.");
-      } else {
+  // Remove from buffer
+  inFlightRequests_.erase(it);
 
-        log("  WARNING: Received piece data for wrong piece/offset. Discarding.");
-        return;
+  if (!saveBlockToBuffer(pieceIndex, begin, msg.payload)) {
+    return; // Failed
+  }
+
+  // Check if this piece is now complete
+  // (We are done if the pipeline for this piece is empty
+  // AND our offset is at the end)
+  bool pieceFinished = (nextBlockOffset_ >= currentPieceBuffer_.size());
+  
+  // Check if any other in-flight requests are for this piece
+  for (const auto& req : inFlightRequests_) {
+      if (req.pieceIndex == nextPieceIndex_) {
+          pieceFinished = false; // Still waiting for more blocks
+          break;
       }
+  }
 
-      // Check if this piece is now complete
-      // (We are done if the pipeline for this piece is empty
-      // AND our offset is at the end)
-      bool pieceFinished = (nextBlockOffset_ >= currentPieceBuffer_.size());
-      
-      // Check if any other in-flight requests are for this piece
-      for (const auto& req : inFlightRequests_) {
-          if (req.pieceIndex == nextPieceIndex_) {
-              pieceFinished = false; // Still waiting for more blocks
-              break;
-          }
-      }
+  if (pieceFinished) {
+    completePiece(pieceIndex);
+  }
 
-      if (pieceFinished) {
-        log("COMPLETED PIECE " + std::to_string(pieceIndex) + " (all blocks received)!");
-
-        auto session = session_.lock();
-        if (!session) return; // Session is gone
-
-
-        // Verify hash
-        if (verifyPieceHash(pieceIndex, session)) {
-          log("HASH OK for piece" + std::to_string(pieceIndex));
-          
-          // Set client bitfield
-          session->updateMyBitfield(pieceIndex);
-          
-          // Call write callback
-          session->onPieceCompleted(pieceIndex, currentPieceBuffer_);
-          
-          // Advance to next piece
-          nextBlockOffset_ = 0;
-          nextPieceIndex_++;
-          currentPieceBuffer_.clear();
-
-        } else {
-          logError("*** HASH FAILED *** for piece " + std::to_string(pieceIndex));
-          // Discard data and reset to re-download this piece
-          nextBlockOffset_ = 0;
-          // nextPieceIndex_ remains the same
-          currentPieceBuffer_.clear();
-
-          // Unassign piece
-          session->unassignPiece(pieceIndex);
-        }
-      }
-
-    } else {
-      log("  WARNING: Received a PIECE that doesn't match any request.");
-    }
 }
 
 

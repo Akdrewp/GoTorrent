@@ -175,12 +175,15 @@ private:
 
   // --- Helper Functions ---
 
+  // --- requestPiece ---
+
   /**
    * @brief Helper for requestPiece
    * 
    * Assigns this peer a piece
    * 
    * @param session The session object
+   * @returns true if assignment was successful, false otherwise
    */
   bool assignNewPiece(std::shared_ptr<ITorrentSession> session);
 
@@ -192,6 +195,20 @@ private:
    * @param pieceLength The length of the current assigned piece
    */
   void requestNextBlock(long long pieceLength);
+
+  // --- handlePiece ---
+
+  /**
+   * @brief Validates and saves the received block data into the piece buffer.
+   * @return true if successful, false if the piece/offset was invalid.
+   */
+  bool saveBlockToBuffer(uint32_t pieceIndex, uint32_t begin, const std::vector<unsigned char>& payload);
+
+  /**
+   * @brief Called when all blocks for a piece have been received.
+   * Verifies hash, writes to disk (via session), and resets state for the next piece.
+   */
+  void completePiece(uint32_t pieceIndex);
   
   /**
    * @brief Checks whether the client has the piece of pieceIndex in their bitfield

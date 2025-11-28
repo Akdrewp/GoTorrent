@@ -5,6 +5,7 @@
 #include "peerConnection.h"
 #include <cstring>
 #include <arpa/inet.h> // For ntohl
+#include <openssl/sha.h>
 
 using namespace testing;
 
@@ -380,6 +381,100 @@ TEST_F(PeerTest, HandleBitfield_ShouldUpdateStateAndNotifySession) {
   EXPECT_FALSE(peer->hasPiece(1));
   EXPECT_TRUE(peer->hasPiece(2));
   EXPECT_FALSE(peer->hasPiece(3));
+}
+
+// --- handlePiece
+
+TEST_F(PeerTest, HandlePiece_Incomplete_ShouldRefillPipeline) {
+
+  // Client interested
+  // Peer NOT choking
+  peer->startAsOutbound({}, "id", session);
+  peer->amInterested_ = true;
+  peer->peerChoking_ = false;
+
+  const int PIECE_IDX = 0;
+  const int BLOCK_SIZE = 16384;
+  const int PIECE_LEN = BLOCK_SIZE * 6;
+
+  // Expectation: The peer should fill request pipeline
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillOnce(Return(PIECE_IDX));
+  EXPECT_CALL(*session, getPieceLength()).WillRepeatedly(Return(PIECE_LEN));
+  EXPECT_CALL(*session, getTotalLength()).WillRepeatedly(Return(1024*1024));
+  EXPECT_CALL(*conn, sendMessage(6, _)).Times(5);
+
+  peer->doAction();
+
+  // Prepare PIECE message for Block 0 (Offset 0)
+  PeerMessage msg;
+  msg.id = 7;
+  uint32_t idx_net = htonl(PIECE_IDX);
+  uint32_t begin_net = htonl(0);
+  msg.payload.resize(8 + BLOCK_SIZE); // Header + Data
+  memcpy(msg.payload.data(), &idx_net, 4);
+  memcpy(msg.payload.data() + 4, &begin_net, 4);
+  // (Data left as zeros)
+
+  // Expectation: The peer should NOT call onPieceCompleted
+  EXPECT_CALL(*session, onPieceCompleted(_, _)).Times(0);
+
+  // Expectation: The peer should request the next block
+  EXPECT_CALL(*conn, sendMessage(6, HasRequestPayload(PIECE_IDX, 81920, BLOCK_SIZE)));
+
+  conn->storedMessageHandler(boost::system::error_code(), msg);
+}
+
+TEST_F(PeerTest, HandlePiece_Complete_ShouldVerifyAndRequestNext) {
+  
+  // Client interested
+  // Peer NOT choking
+  peer->startAsOutbound({}, "id", session);
+  peer->amInterested_ = true;
+  peer->peerChoking_ = false;
+
+  const int PIECE_0 = 0;
+  const int PIECE_1 = 1;
+  const int BLOCK_SIZE = 16384;
+
+  // Expectation: The peer should fill request pipeline
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillOnce(Return(PIECE_0));
+  EXPECT_CALL(*session, getPieceLength()).WillRepeatedly(Return(BLOCK_SIZE));
+  EXPECT_CALL(*session, getTotalLength()).WillRepeatedly(Return(1024*1024));
+  EXPECT_CALL(*conn, sendMessage(6, HasRequestPayload(PIECE_0, 0, BLOCK_SIZE)));
+
+  peer->doAction();
+
+  // Prepare Data and Hash
+  std::vector<unsigned char> data(BLOCK_SIZE, 'A');
+  unsigned char hash[SHA_DIGEST_LENGTH];
+  SHA1(data.data(), data.size(), hash);
+
+  // Prepare PIECE Message
+  PeerMessage msg;
+  msg.id = 7;
+  uint32_t idx_net = htonl(PIECE_0);
+  uint32_t begin_net = htonl(0);
+  msg.payload.resize(8 + BLOCK_SIZE);
+  memcpy(msg.payload.data(), &idx_net, 4);
+  memcpy(msg.payload.data() + 4, &begin_net, 4);
+  memcpy(msg.payload.data() + 8, data.data(), BLOCK_SIZE);
+
+  // Expectation: The peer should ask for proper piece hash
+  EXPECT_CALL(*session, getPieceHash(PIECE_0))
+      .WillOnce(Return(reinterpret_cast<const char*>(hash)));
+  
+  // Expectation: The peer should update bitfield in session
+  EXPECT_CALL(*session, updateMyBitfield(PIECE_0));
+
+  // Expectation: The peer should call onPieceCompleted
+  EXPECT_CALL(*session, onPieceCompleted(PIECE_0, _));
+
+  // 4. Expectations for NEXT Piece
+  // Peer must automatically ask for more work (Piece 1) and request it
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillOnce(Return(PIECE_1));
+  EXPECT_CALL(*conn, sendMessage(6, HasRequestPayload(PIECE_1, 0, BLOCK_SIZE)));
+
+  conn->storedMessageHandler(boost::system::error_code(), msg);
 }
 
 
