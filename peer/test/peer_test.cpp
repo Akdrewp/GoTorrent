@@ -54,6 +54,8 @@ public:
     MockPeerConnection(boost::asio::io_context& io) : PeerConnection(io, "127.0.0.1", 0) {}
 
     MOCK_METHOD(void, sendMessage, (uint8_t id, const std::vector<unsigned char>& payload), (override));
+
+    MOCK_METHOD(void, close, (const boost::system::error_code&), (override));
     
     // Helper to trigger callbacks manually
     HandshakeCallback storedHandshakeHandler;
@@ -477,8 +479,153 @@ TEST_F(PeerTest, HandlePiece_Complete_ShouldVerifyAndRequestNext) {
   conn->storedMessageHandler(boost::system::error_code(), msg);
 }
 
+TEST_F(PeerTest, HandlePiece_ShouldIgnoreBlocksNotInRequestQueue) {
+  
+  // Client interested
+  // Peer NOT choking
+  peer->startAsOutbound({}, "id", session);
+  peer->amInterested_ = true;
+  peer->peerChoking_ = false;
 
-// int main(int argc, char **argv) {
-//   ::testing::InitGoogleTest(&argc, argv);
-//   return RUN_ALL_TESTS();
-// }
+  // Expectation: The peer should fill request pipeline
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillOnce(Return(0));
+  EXPECT_CALL(*session, getPieceLength()).WillRepeatedly(Return(16384));
+  EXPECT_CALL(*session, getTotalLength()).WillRepeatedly(Return(1024*1024));
+  EXPECT_CALL(*conn, sendMessage(6, _)).Times(AtLeast(1));
+
+  peer->doAction(); // Request sent for Piece 0, Offset 0
+
+  // Prepare unsolicited PIECE message (Piece 99)
+  PeerMessage msg;
+  msg.id = 7;
+  uint32_t idx_net = htonl(99); // Wrong index
+  uint32_t begin_net = htonl(0);
+  msg.payload.resize(8 + 16384);
+  memcpy(msg.payload.data(), &idx_net, 4);
+  memcpy(msg.payload.data() + 4, &begin_net, 4);
+
+  // Expectation: The peer should not complete the piece
+  EXPECT_CALL(*session, onPieceCompleted(_, _)).Times(0);
+
+  // Expectation: The peer should not request the next block
+  EXPECT_CALL(*conn, sendMessage(6, _)).Times(0);
+
+  conn->storedMessageHandler(boost::system::error_code(), msg);
+}
+
+TEST_F(PeerTest, HandlePiece_BadHash_ShouldUnassignAndReset) {
+  
+  // Client interested
+  // Peer NOT choking
+  peer->startAsOutbound({}, "id", session);
+  peer->amInterested_ = true;
+  peer->peerChoking_ = false;
+
+  const int PIECE_IDX = 0;
+  const int BLOCK_SIZE = 16384;
+
+  // Expectation: The peer should fill request pipeline
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillRepeatedly(Return(PIECE_IDX));
+  EXPECT_CALL(*session, getPieceLength()).WillRepeatedly(Return(BLOCK_SIZE));
+  EXPECT_CALL(*session, getTotalLength()).WillRepeatedly(Return(1024*1024));
+  EXPECT_CALL(*conn, sendMessage(6, _)).Times(AtLeast(1));
+
+  peer->doAction();
+
+  std::vector<unsigned char> data(BLOCK_SIZE, 'A');
+  
+  // Mock BAD Hash from Session (Expects hash of 'B's)
+  unsigned char badHash[SHA_DIGEST_LENGTH];
+  std::vector<unsigned char> badData(BLOCK_SIZE, 'B');
+  SHA1(badData.data(), badData.size(), badHash);
+
+  // Expectation: The peer should call getPieceHash to compare completed piece
+  EXPECT_CALL(*session, getPieceHash(PIECE_IDX))
+      .WillOnce(Return(reinterpret_cast<const char*>(badHash)));
+
+  // Prepare PIECE Message
+  PeerMessage msg;
+  msg.id = 7;
+  uint32_t idx_net = htonl(PIECE_IDX);
+  uint32_t begin_net = htonl(0);
+  msg.payload.resize(8 + BLOCK_SIZE);
+  memcpy(msg.payload.data(), &idx_net, 4);
+  memcpy(msg.payload.data() + 4, &begin_net, 4);
+  memcpy(msg.payload.data() + 8, data.data(), BLOCK_SIZE);
+
+  // Expectation: The peer should NOT call onPieceCompleted
+  EXPECT_CALL(*session, onPieceCompleted(_, _)).Times(0);
+
+  // Expectation: Should call unassignPiece so it can be tried again
+  EXPECT_CALL(*session, unassignPiece(PIECE_IDX));
+
+  conn->storedMessageHandler(boost::system::error_code(), msg);
+}
+
+TEST_F(PeerTest, ShouldDisconnectAfterThreeBadHashes) {
+  
+  // Client interested
+  // Peer NOT choking
+  peer->startAsOutbound({}, "id", session);
+  peer->amInterested_ = true;
+  peer->peerChoking_ = false;
+
+  const int BLOCK_SIZE = 16384;
+  
+  // Create a test payload
+  PeerMessage msg;
+  msg.id = 7; // Piece
+  uint32_t idx_net = htonl(0);
+  uint32_t begin_net = htonl(0);
+  msg.payload.resize(8 + BLOCK_SIZE);
+  memcpy(msg.payload.data(), &idx_net, 4);
+  memcpy(msg.payload.data() + 4, &begin_net, 4);
+  // Data is all zeros
+
+  // Calculate hash
+  unsigned char realHash[SHA_DIGEST_LENGTH];
+  std::vector<unsigned char> data(BLOCK_SIZE, 0);
+  SHA1(data.data(), data.size(), realHash);
+
+  // Bad hash is just 'X'
+  char badHash[20] = { 'X' };
+
+  // Expectation: The peer should fill request pipeline
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillOnce(Return(0));
+  EXPECT_CALL(*session, getPieceLength()).WillRepeatedly(Return(BLOCK_SIZE));
+  EXPECT_CALL(*session, getTotalLength()).WillRepeatedly(Return(1024*1024));
+  EXPECT_CALL(*conn, sendMessage(6, _));
+
+  peer->doAction(); // Start downloading
+
+  // Expectation: The peer should reject the piece and unAssign it
+  EXPECT_CALL(*session, getPieceHash(0)).WillOnce(Return(badHash));
+  EXPECT_CALL(*session, unassignPiece(0));
+  EXPECT_CALL(*conn, close(_)).Times(0); // Should NOT close yet
+
+  // Expectation: The peer should ask for next piece
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillOnce(Return(0));
+  EXPECT_CALL(*conn, sendMessage(6, _));
+
+  conn->storedMessageHandler(boost::system::error_code(), msg); // Receive Piece
+
+  // Expectation: The peer should ask for work again
+  EXPECT_CALL(*session, assignWorkForPeer(_)).WillOnce(Return(0));
+  EXPECT_CALL(*conn, sendMessage(6, _));
+  peer->doAction(); 
+
+  // Expectation: The peer should reject the piece and unAssign it
+  EXPECT_CALL(*session, getPieceHash(0)).WillOnce(Return(badHash));
+  EXPECT_CALL(*session, unassignPiece(0));
+  EXPECT_CALL(*conn, close(_)).Times(0);
+
+  conn->storedMessageHandler(boost::system::error_code(), msg); // Receive Piece
+
+  // Expectation: The peer should reject the piece and unAssign it
+  //              AND disconnect early
+  EXPECT_CALL(*session, getPieceHash(0)).WillOnce(Return(badHash));
+  EXPECT_CALL(*session, unassignPiece(0)).Times(0); 
+  EXPECT_CALL(*conn, close(Property(&boost::system::error_code::value, static_cast<int>(boost::system::errc::protocol_error))));
+
+  conn->storedMessageHandler(boost::system::error_code(), msg); // Receive Piece
+}

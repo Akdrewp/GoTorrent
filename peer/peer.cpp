@@ -104,6 +104,12 @@ void Peer::onHandshakeComplete(const boost::system::error_code& ec, std::vector<
   sendBitfield();
 }
 
+/**
+ * @brief main logic controller for peer
+ * 
+ * Updates the state after recieving a message via handleMessage
+ * then does an actions based on the new state.
+ */
 void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<PeerMessage> msg) {
   if (ec) {
     logError("Logic: Disconnected (" + ec.message() + ")");
@@ -115,7 +121,6 @@ void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<
         session->unassignPiece(nextPieceIndex_);
       }
     }
-    return;
 
     // We are disconnected stop
     return;
@@ -519,7 +524,17 @@ void Peer::completePiece(uint32_t pieceIndex) {
 
 
   } else {
-    logError("*** HASH FAILED *** for piece " + std::to_string(pieceIndex));
+    failedHashCount_++;
+    logError("*** HASH FAILED *** for piece " + std::to_string(pieceIndex) + 
+             " (Strike " + std::to_string(failedHashCount_) + "/" + std::to_string(MAX_BAD_HASHES) + ")");
+
+    if (failedHashCount_ >= MAX_BAD_HASHES) {
+        logError("Too many hash failures. Disconnecting peer.");
+        // Close the connection with a protocol error.
+        // This will trigger onMessageReceived with the error, which cleans up the session state.
+        conn_->close(boost::system::errc::make_error_code(boost::system::errc::protocol_error));
+        return; 
+    }
     // Discard data and reset to re-download this piece
     nextBlockOffset_ = 0;
     currentPieceBuffer_.clear();
@@ -549,11 +564,11 @@ void Peer::handlePiece(const PeerMessage& msg) {
 
   // Find this block from our in-flight list
   auto it = std::find_if(inFlightRequests_.begin(), inFlightRequests_.end(), 
-      [pieceIndex, begin, blockLength](const PendingRequest& req) {
-          return req.pieceIndex == pieceIndex && 
-                  req.begin == begin && 
-                  req.length == blockLength;
-      });
+    [pieceIndex, begin, blockLength](const PendingRequest& req) {
+        return req.pieceIndex == pieceIndex && 
+                req.begin == begin && 
+                req.length == blockLength;
+    });
 
   if (it == inFlightRequests_.end()) {
     logError("  ERROR: Received a PIECE that doesn't match any request.");
@@ -574,10 +589,10 @@ void Peer::handlePiece(const PeerMessage& msg) {
   
   // Check if any other in-flight requests are for this piece
   for (const auto& req : inFlightRequests_) {
-      if (req.pieceIndex == nextPieceIndex_) {
-          pieceFinished = false; // Still waiting for more blocks
-          break;
-      }
+    if (req.pieceIndex == nextPieceIndex_) {
+      pieceFinished = false; // Still waiting for more blocks
+      break;
+    }
   }
 
   if (pieceFinished) {
@@ -590,7 +605,7 @@ void Peer::handlePiece(const PeerMessage& msg) {
 // --- Helper Functions ---
 
 /**
- * @brief Checks if *we* have a specific piece.
+ * @brief Checks if the client has a specific piece.
  */
 bool Peer::clientHasPiece(size_t pieceIndex) const {
   if (auto session = session_.lock()) {
@@ -615,7 +630,7 @@ bool Peer::verifyPieceHash(size_t pieceIndex, std::shared_ptr<ITorrentSession> s
   unsigned char calculatedHash[SHA_DIGEST_LENGTH]; // 20 bytes
   SHA1(currentPieceBuffer_.data(), currentPieceBuffer_.size(), calculatedHash);
   
-  // --- MODIFIED: Get hash from session ---
+  // --- Get hash from session ---
   const char* expectedHash = session->getPieceHash(pieceIndex);
   if (!expectedHash) {
     return false; // Invalid index

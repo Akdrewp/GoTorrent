@@ -2,6 +2,7 @@
 #define TORRENT_SESSION_H
 
 #include "ITorrentSession.h"
+#include "httpTrackerClient.h"
 #include "torrent.h"
 #include "tracker.h"
 #include "peer.h"
@@ -29,12 +30,14 @@ public:
    * @param torrent The parsed torrent data.
    * @param peerId The client's global 20-byte peer ID.
    * @param port The port the client is listening on.
+   * @param trackerClient the tracker send request to use
    */
   TorrentSession(
     asio::io_context& io_context, 
     TorrentData torrent,
     std::string& peerId,
-    unsigned short port
+    unsigned short port,
+    std::shared_ptr<ITrackerClient> trackerClient
   );
 
   /**
@@ -104,6 +107,9 @@ private:
   size_t numPieces_ = 0;
   std::vector<uint8_t> myBitfield_; // Client bitfield
   std::string pieceHashes_;         // Raw 20-byte SHA1 hashes
+
+  // Tracker dependency
+  std::shared_ptr<ITrackerClient> trackerClient_;
 
   // --- File Info ---
   std::string outputFilename_;

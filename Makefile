@@ -52,6 +52,7 @@ CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 TEST_SRCS = bencode/test/bencode_test.cpp \
             bencode/bencode.cpp \
             peer/test/peer_test.cpp \
+						client/test/torrentSession_test.cpp \
             peer/peer.cpp \
             peer/peerConnection.cpp \
             client/torrentSession.cpp \

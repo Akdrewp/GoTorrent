@@ -1,6 +1,7 @@
 #include "client.h"
 #include "peer.h"     // For Peer
 #include "bencode.h"  // For BencodeValue, parseBencodedValue
+#include "httpTrackerClient.h" // For Tracker
 
 #include <iostream>    // For std::cout, std::cerr
 #include <iomanip>     // For std::setw, std::hex
@@ -73,12 +74,16 @@ void Client::run() {
   // Generate a peer_id
   peerId_ = generatePeerId();
 
+  // Tracker
+  auto trackerClient = std::make_shared<HttpTrackerClient>(); 
+
   // Create the TorrentSession to manage this download
   session_ = std::make_shared<TorrentSession>(
     io_context_, 
     std::move(torrent), 
     peerId_, 
-    port_
+    port_,
+    trackerClient
   );
 
   try {

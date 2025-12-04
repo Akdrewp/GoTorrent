@@ -51,11 +51,13 @@ TorrentSession::TorrentSession(
   asio::io_context& io_context, 
   TorrentData torrent,
   std::string& peerId,
-  unsigned short port
+  unsigned short port,
+  std::shared_ptr<ITrackerClient> trackerClient
 ) : io_context_(io_context),
     peerId_(peerId),
     port_(port),
-    torrent_(std::move(torrent))
+    torrent_(std::move(torrent)),
+    trackerClient_(std::move(trackerClient))
 {
 }
 
@@ -171,7 +173,7 @@ void TorrentSession::requestPeers() {
   std::cout << "Total Length (left): " << totalLength_ << std::endl;
 
   std::cout << "\n--- SENDING REQUEST TO TRACKER ---" << std::endl;
-  std::string trackerResponse = sendTrackerRequest(trackerUrl);
+  std::string trackerResponse = trackerClient_.get()->sendRequest(trackerUrl);
   std::cout << "Tracker raw response size: " << trackerResponse.size() << " bytes" << std::endl;
 
   // Parse the tracker's response
