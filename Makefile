@@ -25,7 +25,7 @@ TEST_LIBS = -lgtest -lgtest_main -lgmock -pthread
 
 # 3. Project Structure
 # Add all directories that contain .h files
-INC_DIRS = -Isrc -Ibencode -Itorrent -Itracker -Iclient -Ipeer
+INC_DIRS = -Isrc -Ibencode -Itorrent -Itracker -Iclient -Ipeer -Iclient/torrentStorage
 CXXFLAGS += $(INC_DIRS)
 
 # 4. Targets
@@ -45,7 +45,7 @@ CLIENT_SRCS = $(wildcard src/*.cpp) \
               $(wildcard torrent/*.cpp) \
               $(wildcard tracker/*.cpp) \
               $(wildcard client/*.cpp) \
-              $(wildcard peer/*.cpp)
+              $(wildcard peer/*.cpp) \
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 
 # Define source files for the TESTS
@@ -57,7 +57,8 @@ TEST_SRCS = bencode/test/bencode_test.cpp \
             peer/peerConnection.cpp \
             client/torrentSession.cpp \
             tracker/tracker.cpp \
-            torrent/torrent.cpp
+            torrent/torrent.cpp \
+						client/torrentStorage/torrentStorage.cpp
 
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 

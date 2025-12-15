@@ -6,7 +6,7 @@
 #include <boost/asio/buffer.hpp> // For asio::buffer
 
 static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
-static constexpr int TIMEOUT_TIME = 180; // Should be 5
+static constexpr int TIMEOUT_TIME = 5; // Should be 5 seconds
 
 // --- OUTBOUND ---
 PeerConnection::PeerConnection(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port)

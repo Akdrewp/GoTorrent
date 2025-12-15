@@ -154,9 +154,10 @@ long long getTotalLengthTorrent(const BencodeDict& infoDict) {
     // The value is a unique_ptr<BencodeValue>, we dereference it
     // then access its .value (the variant), then get the long long
     if (auto* val = std::get_if<long long>(&(lengthIt->second->value))) {
-        return *val;
+      std::cout << "Torrent total length: " << *val << std::endl;
+      return *val;
     } else {
-        throw std::runtime_error("Invalid torrent: 'length' is not an integer.");
+      throw std::runtime_error("Invalid torrent: 'length' is not an integer.");
     }
   }
 

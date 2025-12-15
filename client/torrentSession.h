@@ -2,6 +2,7 @@
 #define TORRENT_SESSION_H
 
 #include "ITorrentSession.h"
+#include "ITorrentStorage.h"
 #include "httpTrackerClient.h"
 #include "torrent.h"
 #include "tracker.h"
@@ -37,7 +38,8 @@ public:
     TorrentData torrent,
     std::string& peerId,
     unsigned short port,
-    std::shared_ptr<ITrackerClient> trackerClient
+    std::shared_ptr<ITrackerClient> trackerClient,
+    std::shared_ptr<ITorrentStorage> storage
   );
 
   /**
@@ -94,6 +96,10 @@ private:
    */
   void checkIfPeerIsInteresting(std::shared_ptr<Peer> peer);
 
+  // --- Helper Functions ---
+
+  // --- Helper Functions END ---
+
 
   // --- Client Server Components ---
   asio::io_context& io_context_;
@@ -108,8 +114,9 @@ private:
   std::vector<uint8_t> myBitfield_; // Client bitfield
   std::string pieceHashes_;         // Raw 20-byte SHA1 hashes
 
-  // Tracker dependency
+  // Dependencies
   std::shared_ptr<ITrackerClient> trackerClient_;
+  std::shared_ptr<ITorrentStorage> storage_;
 
   // --- File Info ---
   std::string outputFilename_;

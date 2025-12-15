@@ -5,6 +5,7 @@
 #include <variant>    // For std::visit, std::get_if
 #include <stdexcept>  // For std::runtime_error
 #include <functional> // For std::bind, std::placeholders
+#include <random> // For random
 
 //--- Bencode Printer ---
 
@@ -52,12 +53,14 @@ TorrentSession::TorrentSession(
   TorrentData torrent,
   std::string& peerId,
   unsigned short port,
-  std::shared_ptr<ITrackerClient> trackerClient
+  std::shared_ptr<ITrackerClient> trackerClient,
+  std::shared_ptr<ITorrentStorage> storage
 ) : io_context_(io_context),
     peerId_(peerId),
     port_(port),
     torrent_(std::move(torrent)),
-    trackerClient_(std::move(trackerClient))
+    trackerClient_(std::move(trackerClient)),
+    storage_(std::move(storage))
 {
 }
 
@@ -71,6 +74,26 @@ void TorrentSession::start() {
   loadTorrentInfo();
   requestPeers();
   connectToPeers();
+}
+
+// --- loadTorrentInfo ---
+
+/**
+ * Helper function for loadTorrentInfo
+ * 
+ * @brief Extracts the piece length from the info dictionary.
+ * 
+ * @param infoDict The BencodeDict from .torrent file
+ */
+static long long getTorrentPieceLength(const BencodeDict& infoDict) {
+  if (infoDict.count("piece length")) {
+    auto& lengthVal = infoDict.at("piece length")->value;
+    if (auto* len = std::get_if<long long>(&lengthVal)) {
+      std::cout << "Torrent piece length: " << *len << std::endl;
+      return *len;
+    }
+  }
+  throw std::runtime_error("Invalid 'piece length'.");
 }
 
 void TorrentSession::loadTorrentInfo() {
@@ -90,39 +113,11 @@ void TorrentSession::loadTorrentInfo() {
   // Amount of pieces is length of "pieces" / 20
   numPieces_ = piecesStr->length() / 20;
 
-  auto& pieceLenVal = infoDict->at("piece length")->value;
-  if (auto* len = std::get_if<long long>(&pieceLenVal)) {
-    pieceLength_ = *len;
-  } else {
-    throw std::runtime_error("Invalid 'piece length'.");
-  }
-  totalLength_ = getTotalLengthTorrent(*infoDict); 
-  std::cout << "Torrent piece length: " << pieceLength_ << std::endl;
-  std::cout << "Torrent total length: " << totalLength_ << std::endl;
+  pieceLength_ = getTorrentPieceLength(*infoDict);
+  totalLength_ = getTotalLengthTorrent(*infoDict);
 
-  // Get file name for output (Single file)
-  if (infoDict->count("name")) {
-    if (auto* name = std::get_if<std::string>(&(infoDict->at("name")->value))) {
-      outputFilename_ = *name;
-      std::cout << "Output file: " << outputFilename_ << std::endl;
-
-      // Open the file for binary read/write.
-      // Create it if it doesn't exist.
-      outputFile_.open(outputFilename_, std::ios::binary | std::ios::in | std::ios::out);
-      if (!outputFile_.is_open()) {
-        std::cout << "File not found, creating..." << std::endl;
-        outputFile_.open(outputFilename_, std::ios::binary | std::ios::out);
-      }
-      
-      if (!outputFile_.is_open()) {
-        throw std::runtime_error("Failed to open or create output file: " + outputFilename_);
-      }
-    } else {
-      throw std::runtime_error("Torrent 'name' is not a string.");
-    }
-  } else {
-    throw std::runtime_error("Torrent has no 'name' (multi-file torrents not supported).");
-  }
+  // Initialize file storage
+  storage_->initialize(torrent_, pieceLength_);
 
   // Each bit in the bitfield corresponds to a piece being recieved
   //
@@ -279,37 +274,8 @@ void TorrentSession::handleInboundConnection(tcp::socket socket) {
 void TorrentSession::onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data) {
   unassignPiece(pieceIndex);
 
-  if (!outputFile_.is_open()) {
-    std::cerr << "--- SESSION: ERROR! Output file is not open. Cannot write piece " << pieceIndex << " ---" << std::endl;
-    return;
-  }
+  storage_->writePiece(pieceIndex, data);
 
-  // Calculate the byte offset in the file
-  long long offset = static_cast<long long>(pieceIndex) * pieceLength_;
-  std::cout << "--- SESSION: Writing piece " << pieceIndex << " to disk at offset " << offset << " (" << data.size() << " bytes) ---" << std::endl;
-
-  // Seek to the correct position
-  outputFile_.seekp(offset, std::ios::beg);
-  if (outputFile_.fail()) {
-      std::cerr << "--- SESSION: ERROR! Failed to seek to offset " << offset << " ---" << std::endl;
-      outputFile_.clear(); // Clear error state
-      return;
-  }
-
-  // Write the data at position
-  outputFile_.write(reinterpret_cast<const char*>(data.data()), data.size());
-  if (outputFile_.fail()) {
-      std::cerr << "--- SESSION: ERROR! Failed to write data for piece " << pieceIndex << " ---" << std::endl;
-      outputFile_.clear(); // Clear error state
-      return;
-  }
-
-  // Flush the buffer to ensure it's written to disk
-  outputFile_.flush();
-  if (outputFile_.fail()) {
-      std::cerr << "--- SESSION: ERROR! Failed to flush file stream for piece " << pieceIndex << " ---" << std::endl;
-      outputFile_.clear(); // Clear error state
-  }
 }
 
 /**
@@ -360,32 +326,115 @@ void TorrentSession::onHaveReceived(std::shared_ptr<Peer> peer, size_t pieceInde
   checkIfPeerIsInteresting(peer);
 }
 
+// --- assignWorkForPeer ---
+
 /**
- * @brief Finds the best piece for the peer to start requesting
+ * @brief Gets the pieces the peer has sorted from least to most rare
  */
-std::optional<size_t> TorrentSession::assignWorkForPeer(std::shared_ptr<Peer> peer) {
-  // TODO: This is "first available" strategy.
-  // Need to implement rarest first
+static std::vector<size_t> getSortedCandidatePieces(
+  const std::shared_ptr<Peer>& peer,
+  size_t numPieces,
+  const std::vector<size_t>& pieceAvailability,
+  const std::set<size_t>& assignedPieces,
+  std::function<bool(size_t)> clientHasPieceFn
+) {
+  struct Candidate {
+    size_t index;
+    size_t rarity;
+  };
 
-  for (size_t i = 0; i < numPieces_; ++i) {
-    // Check if peer has this piece
+  std::vector<Candidate> candidates;
+  // Reserve to avoid reallocations
+  candidates.reserve(numPieces);
+
+  // Get valid piece that:
+  // Peer has AND client doesn't AND not currently assigned
+  for (size_t i = 0; i < numPieces; ++i) {
     if (peer->hasPiece(i)) {
-      
-      // Check if client doesn't have this piece
-      if (!clientHasPiece(i)) {
-
-        // Check it's not already assigned
-        if (assignedPieces_.count(i) == 0) {
-          std::cout << "--- SESSION: Assigning piece " << i << " ---" << std::endl;
-          assignedPieces_.insert(i);
-          return i;
+      if (!clientHasPieceFn(i)) {
+        if (assignedPieces.count(i) == 0) {
+          // Valid candidate
+          candidates.push_back({ i, pieceAvailability[i] });
         }
       }
     }
   }
 
-  // No pieces for this peer
-  return std::nullopt;
+  // Sort candidates by Rarity (Ascending), then by Index
+  std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+    if (a.rarity != b.rarity) {
+      return a.rarity < b.rarity; // Prioritize rarer pieces
+    }
+    // Same rarity choose lower index
+    return a.index < b.index;
+  });
+
+  // Extract sorted indices
+  std::vector<size_t> sortedIndices;
+  sortedIndices.reserve(candidates.size());
+  for (const auto& c : candidates) {
+    sortedIndices.push_back(c.index);
+  }
+
+  return sortedIndices;
+}
+
+/**
+ * @brief Gets top randomVariance pieces from pieces array and returns one at random
+ * 
+ * @param pieces The pieces array sorted from most to least rare
+ * @param randomVariance How many pieces to choose from the top
+ * 
+ * @returns The index of randomly chosen piece
+ */
+static size_t getTopRandomPiece(std::vector<size_t> pieces, int randomVariance) {
+  size_t poolSize = std::min(pieces.size(), static_cast<size_t>(randomVariance));
+  
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(0, poolSize - 1);
+
+  size_t chosenIndex = pieces[dis(gen)];
+
+  std::cout << "--- SESSION: Assigning piece " << chosenIndex;
+  
+  return chosenIndex;
+}
+
+/**
+ * @brief Finds the best piece for the peer to start requesting
+ * 
+ * Uses the Rarest first strategy:
+ * Selects the piece that the least amount of peers have
+ * 
+ * @param peer The peer to assign a piece to
+ */
+std::optional<size_t> TorrentSession::assignWorkForPeer(std::shared_ptr<Peer> peer) {
+  // Rarest First with Randomness
+  // 1. Get peer pieces sorted by rarity
+  // 2. Choose from top N rarest pieces where N is variance
+
+  std::vector<size_t> sortedPieces = getSortedCandidatePieces(
+    peer, 
+    numPieces_, 
+    pieceAvailability_, 
+    assignedPieces_, 
+    [this](size_t i) { return clientHasPiece(i); }
+  );
+
+  // If no candidates, we have nothing for this peer to do
+  if (sortedPieces.empty()) {
+    return std::nullopt;
+  }
+
+  int chosenPieceIndex = getTopRandomPiece(sortedPieces, 1); // Random variance = 1 for now
+
+  std::cout << "--- SESSION: Assigning piece " << chosenPieceIndex;
+
+  // Lock the piece so no one else picks it
+  assignedPieces_.insert(chosenPieceIndex);
+  
+  return chosenPieceIndex;
 }
 
 /**
