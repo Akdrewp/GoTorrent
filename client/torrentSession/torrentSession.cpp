@@ -116,8 +116,10 @@ void TorrentSession::loadTorrentInfo() {
   pieceLength_ = getTorrentPieceLength(*infoDict);
   totalLength_ = getTotalLengthTorrent(*infoDict);
 
+  // TODO CHANGE
+  std::string DOWNLOAD_PATH = "."; // Current directory
   // Initialize file storage
-  storage_->initialize(torrent_, pieceLength_);
+  storage_->initialize(torrent_, pieceLength_, DOWNLOAD_PATH);
 
   // Each bit in the bitfield corresponds to a piece being recieved
   //

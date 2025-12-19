@@ -25,7 +25,14 @@ TEST_LIBS = -lgtest -lgtest_main -lgmock -pthread
 
 # 3. Project Structure
 # Add all directories that contain .h files
-INC_DIRS = -Isrc -Ibencode -Itorrent -Itracker -Iclient -Ipeer -Iclient/torrentStorage
+INC_DIRS = -Isrc \
+           -Ibencode \
+           -Itorrent \
+           -Itracker \
+           -Iclient \
+           -Ipeer \
+           -Iclient/torrentStorage \
+           -Iclient/torrentSession
 CXXFLAGS += $(INC_DIRS)
 
 # 4. Targets
@@ -46,19 +53,22 @@ CLIENT_SRCS = $(wildcard src/*.cpp) \
               $(wildcard tracker/*.cpp) \
               $(wildcard client/*.cpp) \
               $(wildcard peer/*.cpp) \
+              $(wildcard client/torrentStorage/*.cpp) \
+              $(wildcard client/torrentSession/*.cpp)
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 
 # Define source files for the TESTS
 TEST_SRCS = bencode/test/bencode_test.cpp \
             bencode/bencode.cpp \
             peer/test/peer_test.cpp \
-						client/test/torrentSession_test.cpp \
+            client/torrentSession/test/torrentSession_test.cpp \
+            client/torrentStorage/test/diskTorrentStorage_test.cpp \
             peer/peer.cpp \
             peer/peerConnection.cpp \
-            client/torrentSession.cpp \
+            client/torrentSession/torrentSession.cpp \
             tracker/tracker.cpp \
             torrent/torrent.cpp \
-						client/torrentStorage/torrentStorage.cpp
+            client/torrentStorage/diskTorrentStorage.cpp
 
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 

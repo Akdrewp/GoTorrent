@@ -17,9 +17,14 @@ public:
     /**
      * @brief Prepares the storage (opens files, creates directories).
      * @param torrent The parsed torrent data containing file info.
-     * @param pieceLength Length of each piece
+     * @param pieceLength The length of a standard piece in bytes.
+     * @param downloadDirectory The base directory where files should be saved.
      */
-    virtual void initialize(const TorrentData& torrent, long long pieceLength) = 0;
+    virtual void initialize(
+      const TorrentData& torrent, 
+      long long pieceLength, 
+      const std::string& downloadDirectory
+    ) = 0;
 
     /**
      * @brief Writes a verified piece to the storage.

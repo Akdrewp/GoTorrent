@@ -18,7 +18,7 @@ public:
 
 class MockTorrentStorage : public ITorrentStorage {
 public:
-  MOCK_METHOD(void, initialize, (const TorrentData&, long long), (override));
+  MOCK_METHOD(void, initialize, (const TorrentData&, long long, const std::string&), (override));
   MOCK_METHOD(void, writePiece, (size_t, const std::vector<uint8_t>&), (override));
 };
 
@@ -91,7 +91,7 @@ protected:
     session = std::make_shared<TorrentSession>(io, std::move(torrent), peerId, port, mockTracker, mockStorage);
 
     EXPECT_CALL(*mockTracker, sendRequest(_)).WillOnce(Return("de"));
-    EXPECT_CALL(*mockStorage, initialize(_, _)); 
+    EXPECT_CALL(*mockStorage, initialize(_, _, _)); 
     
     // Manually trigger initialization (usually done by run() in client.cpp)
     try {
