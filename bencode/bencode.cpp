@@ -246,3 +246,40 @@ BencodeValue parseBencodedValue(const std::vector<char>& fileBytes, size_t& inde
     throw std::runtime_error("Parsing error: Unknown value type.");
   }
 }
+
+struct BencodePrinter {
+  int indent;
+  void operator()(long long val) const { std::cout << val; }
+  void operator()(const std::string& val) const {
+    if (indent > 2) { std::cout << "\"(... compact peers data ...)\""; return; }
+    std::cout << "\"";
+    for(unsigned char c : val) {
+      if (std::isprint(c) && c != '\\' && c != '\"') { std::cout << c; }
+      else { std::cout << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(c) << std::dec; }
+    }
+    std::cout << "\"";
+  }
+  void operator()(const BencodeList& list) const {
+    std::cout << "[\n";
+    for (const auto& item_ptr : list) {
+      std::cout << std::string(indent + 2, ' ');
+      printBencodeValue(*item_ptr, indent + 2);
+      std::cout << ",\n";
+    }
+    std::cout << std::string(indent, ' ') << "]";
+  }
+  void operator()(const BencodeDict& dict) const {
+    std::cout << "{\n";
+    for (const auto& [key, val_ptr] : dict) {
+      std::cout << std::string(indent + 2, ' ') << "\"" << key << "\": ";
+      if (key == "pieces") { std::cout << "\"(... pieces data redacted ...)\""; }
+      else { printBencodeValue(*val_ptr, indent + 2); }
+      std::cout << ",\n";
+    }
+    std::cout << std::string(indent, ' ') << "}";
+  }
+};
+
+void printBencodeValue(const BencodeValue& bv, int indent) {
+  std::visit(BencodePrinter{indent}, bv.value);
+}

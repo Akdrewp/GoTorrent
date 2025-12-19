@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>   // For std::unique_ptr
 #include <variant>  // For std::variant
+#include <stdexcept>
 
 
 // --- Type Definitions ---
@@ -32,19 +33,33 @@ using BencodeDict = std::map<std::string, std::unique_ptr<BencodeValue>>;
  * A BencodeValue can be ONE of these types at any given time.
  */
 struct BencodeValue {
-    std::variant<
-        long long,
-        std::string,
-        BencodeList,
-        BencodeDict 
-    > value;
+  std::variant<
+    long long,
+    std::string,
+    BencodeList,
+    BencodeDict 
+  > value;
+
+  /**
+   * @brief Strict type extraction helper.
+   * Checks if the active value matches type T.
+   * @return const reference to the value.
+   * @throws std::runtime_error if types mismatch.
+   */
+  template <typename T>
+  const T& get() const {
+    if (auto* val = std::get_if<T>(&value)) {
+      return *val;
+    }
+    throw std::runtime_error("Bencode type mismatch: Expected different type.");
+  }
 };
 
 template<typename T>
 std::unique_ptr<BencodeValue> makeBencode(T val) {
-    auto bv_ptr = std::make_unique<BencodeValue>();
-    bv_ptr->value = std::move(val);
-    return bv_ptr;
+  auto bv_ptr = std::make_unique<BencodeValue>();
+  bv_ptr->value = std::move(val);
+  return bv_ptr;
 }
 
 // --- Parser Function Declarations ---
@@ -105,6 +120,13 @@ BencodeValue parseDictionary(const std::vector<char>& fileBytes, size_t& index);
  * @param index A reference to the current parsing position.
  */
 BencodeValue parseBencodedValue(const std::vector<char>& fileBytes, size_t& index);
+
+/**
+ * @brief Recursively prints a BencodeValue structure to stdout.
+ * @param bv The bencode value to print.
+ * @param indent The current indentation level (spaces).
+ */
+void printBencodeValue(const BencodeValue& bv, int indent = 0);
 
 #endif // BENCODE_H
 

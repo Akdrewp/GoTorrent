@@ -20,21 +20,15 @@ static std::runtime_error DiskStorageError(const std::string& message) {
 // End
 
 void DiskTorrentStorage::initialize(const TorrentData& torrent, long long pieceLength, const std::string& downloadDirectory) {
-  auto& infoVal = torrent.mainData.at("info")->value;
-  auto* infoDict = std::get_if<BencodeDict>(&infoVal);
-  if (!infoDict) throw DiskStorageError("Invalid info dictionary.");
+  auto& infoDict = torrent.mainData.at("info")->get<BencodeDict>();
 
   pieceLength_ = pieceLength;
   downloadDirectory_ = downloadDirectory;
 
   // Single file torrent
-  if (infoDict->count("name")) {
-    if (auto* name = std::get_if<std::string>(&(infoDict->at("name")->value))) {
-      outputFilename_ = *name;
-      initializeSingleFile();
-    } else {
-      throw DiskStorageError("Torrent 'name' is not a string.");
-    }
+  if (infoDict.count("name")) {
+    outputFilename_ = infoDict.at("name")->get<std::string>();
+    initializeSingleFile();
   } else { // Multifile torrent
     throw DiskStorageError("Torrent has no 'name' (multi-file not supported).");
   }

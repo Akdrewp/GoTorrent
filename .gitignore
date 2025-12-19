@@ -7,6 +7,9 @@
 #Ignore torrent files
 *.torrent
 
+# Ignore download folder
+/downloads
+
 # Ignore compiled executables
 bittorrent_client
 test_runner_executable

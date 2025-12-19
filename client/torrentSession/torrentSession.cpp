@@ -7,45 +7,6 @@
 #include <functional> // For std::bind, std::placeholders
 #include <random> // For random
 
-//--- Bencode Printer ---
-
-static void printBencodeValue(const BencodeValue& bv, int indent = 0);
-struct BencodePrinter {
-  int indent;
-  void operator()(long long val) const { std::cout << val; }
-  void operator()(const std::string& val) const {
-    if (indent > 2) { std::cout << "\"(... compact peers data ...)\""; return; }
-    std::cout << "\"";
-    for(unsigned char c : val) {
-      if (std::isprint(c) && c != '\\' && c != '\"') { std::cout << c; }
-      else { std::cout << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(c) << std::dec; }
-    }
-    std::cout << "\"";
-  }
-  void operator()(const BencodeList& list) const {
-    std::cout << "[\n";
-    for (const auto& item_ptr : list) {
-      std::cout << std::string(indent + 2, ' ');
-      printBencodeValue(*item_ptr, indent + 2);
-      std::cout << ",\n";
-    }
-    std::cout << std::string(indent, ' ') << "]";
-  }
-  void operator()(const BencodeDict& dict) const {
-    std::cout << "{\n";
-    for (const auto& [key, val_ptr] : dict) {
-      std::cout << std::string(indent + 2, ' ') << "\"" << key << "\": ";
-      if (key == "pieces") { std::cout << "\"(... pieces data redacted ...)\""; }
-      else { printBencodeValue(*val_ptr, indent + 2); }
-      std::cout << ",\n";
-    }
-    std::cout << std::string(indent, ' ') << "}";
-  }
-};
-static void printBencodeValue(const BencodeValue& bv, int indent) {
-  std::visit(BencodePrinter{indent}, bv.value);
-}
-
 // --- TorrentSession class ---
 
 TorrentSession::TorrentSession(
@@ -87,37 +48,29 @@ void TorrentSession::start() {
  */
 static long long getTorrentPieceLength(const BencodeDict& infoDict) {
   if (infoDict.count("piece length")) {
-    auto& lengthVal = infoDict.at("piece length")->value;
-    if (auto* len = std::get_if<long long>(&lengthVal)) {
-      std::cout << "Torrent piece length: " << *len << std::endl;
-      return *len;
-    }
+    return infoDict.at("piece length")->get<long long>();
   }
   throw std::runtime_error("Invalid 'piece length'.");
 }
 
 void TorrentSession::loadTorrentInfo() {
   // Calculate our bitfield size
-  auto& infoVal = torrent_.mainData.at("info")->value;
-  auto* infoDict = std::get_if<BencodeDict>(&infoVal);
-  if (!infoDict) throw std::runtime_error("Invalid info dictionary.");
+  const auto& infoDict = torrent_.mainData.at("info")->get<BencodeDict>();
 
-  auto& piecesVal = infoDict->at("pieces")->value;
-  auto* piecesStr = std::get_if<std::string>(&piecesVal);
-  if (!piecesStr) throw std::runtime_error("Invalid 'pieces' string.");
+  const std::string& piecesStr = infoDict.at("pieces")->get<std::string>();
 
   // Store the pieces hashes
-  pieceHashes_ = *piecesStr;
+  pieceHashes_ = piecesStr;
 
   // Each piece has a hash in "pieces" each with length 20
   // Amount of pieces is length of "pieces" / 20
-  numPieces_ = piecesStr->length() / 20;
+  numPieces_ =  pieceHashes_.length() / 20;
 
-  pieceLength_ = getTorrentPieceLength(*infoDict);
-  totalLength_ = getTotalLengthTorrent(*infoDict);
+  pieceLength_ = getTorrentPieceLength(infoDict);
+  totalLength_ = getTotalLengthTorrent(infoDict);
 
   // TODO CHANGE
-  std::string DOWNLOAD_PATH = "."; // Current directory
+  std::string DOWNLOAD_PATH = "./downloads"; // Current directory downloads folder
   // Initialize file storage
   storage_->initialize(torrent_, pieceLength_, DOWNLOAD_PATH);
 
@@ -144,13 +97,7 @@ void TorrentSession::loadTorrentInfo() {
 
 void TorrentSession::requestPeers() {
   // Get announce URL
-  auto& announceVal = torrent_.mainData.at("announce")->value;
-  std::string announceUrl;
-  if (auto* url = std::get_if<std::string>(&announceVal)) {
-    announceUrl = *url;
-  } else {
-    throw std::runtime_error("Announce URL is not a string.");
-  }
+  std::string announceUrl = torrent_.mainData.at("announce")->get<std::string>();
 
   // Build the Tracker GET URL
   std::string trackerUrl = buildTrackerUrl(
@@ -184,27 +131,17 @@ void TorrentSession::requestPeers() {
 
   // Get peer list
   std::cout << "\n--- PARSED PEER LIST ---" << std::endl;
-  if (auto* respDict = std::get_if<BencodeDict>(&parsedResponse.value)) {
-    if (respDict->count("failure reason")) {
-      auto& failVal = respDict->at("failure reason")->value;
-      if (auto* failStr = std::get_if<std::string>(&failVal)) {
-        throw std::runtime_error("Tracker error: " + *failStr);
-      }
-    }
+  const auto& respDict = parsedResponse.get<BencodeDict>();
 
-    if (respDict->count("peers")) {
-      auto& peersVal = respDict->at("peers")->value;
-      if (auto* peersStr = std::get_if<std::string>(&peersVal)) {
-        trackerPeers_ = parseCompactPeers(*peersStr); // Store peers in member
-        for (const auto& peer : trackerPeers_) {
-          std::cout << "Peer: " << peer.ip << ":" << peer.port << std::endl;
-        }
-      } else {
-        std::cout << "(Peers key was not a compact string)" << std::endl;
-      }
-    }
-  } else {
-    throw std::runtime_error("Tracker response was not a dictionary.");
+  if (respDict.count("failure reason")) {
+    std::string failure = respDict.at("failure reason")->get<std::string>();
+    throw std::runtime_error("Tracker error: " + failure);
+  }
+
+  if (respDict.count("peers")) {
+    // Assume compact
+    std::string peersStr = respDict.at("peers")->get<std::string>();
+    trackerPeers_ = parseCompactPeers(peersStr);
   }
 }
 
