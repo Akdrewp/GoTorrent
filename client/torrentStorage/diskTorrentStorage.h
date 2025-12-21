@@ -30,6 +30,18 @@ public:
    */
   void writePiece(size_t pieceIndex, const std::vector<uint8_t>& data) override;
 
+  /**
+   * @brief Reads a specific block from the file.
+   * Calculates the global file offset based on piece index and begin offset
+   * then reads the bytes from there
+   * 
+   * @param pieceIndex The index of the piece.
+   * @param begin The byte offset within that piece.
+   * @param length The number of bytes to read.
+   * @return The data read from disk.
+   */
+  std::vector<uint8_t> readBlock(size_t pieceIndex, size_t begin, size_t length) override;
+
 private:
 
   /**
@@ -38,6 +50,11 @@ private:
    * based on the stored outputFilePath_ and std::string downloadDirectory_
    */
   void initializeSingleFile();
+
+  /**
+   * @brief Reads raw bytes from the file stream at a specific global offset.
+   */
+  std::vector<uint8_t> readBytes(long long offset, size_t length);
 
   std::string downloadDirectory_;
   std::string outputFilename_;

@@ -143,7 +143,6 @@ TEST_F(DiskTorrentStorageTest, WritePiece_ShouldOverwriteExistingData_IfCalledOn
   // Initiailize
   storage->initialize(torrent, pieceLength, testDir);
 
-
   // Write Bad Data all 'X"
   std::vector<uint8_t> badData(10, 'X');
   storage->writePiece(0, badData);

@@ -122,3 +122,41 @@ void DiskTorrentStorage::writePiece(size_t pieceIndex, const std::vector<uint8_t
     throw DiskStorageError("Failed to flush file stream for piece " + std::to_string(pieceIndex));
   }
 }
+
+// --- readBlock ---
+
+std::vector<uint8_t> DiskTorrentStorage::readBlock(size_t pieceIndex, size_t begin, size_t length) {
+  // Calculate global offset
+  long long offset = (static_cast<long long>(pieceIndex) * pieceLength_) + begin;
+  
+  // Read the bytes in block
+  return readBytes(offset, length);
+}
+
+std::vector<uint8_t> DiskTorrentStorage::readBytes(long long offset, size_t length) {
+  if (!outputFile_.is_open()) {
+    throw DiskStorageError("Read failed: Output file is not open.");
+  }
+
+  // Seek to position
+  outputFile_.seekg(offset, std::ios::beg);
+  if (outputFile_.fail()) {
+    outputFile_.clear();
+    throw DiskStorageError("Read failed: Could not seek to offset " + std::to_string(offset));
+  }
+
+  std::vector<uint8_t> buffer(length);
+  
+  // Read bytes
+  outputFile_.read(reinterpret_cast<char*>(buffer.data()), length);
+
+  // Check results
+  if (outputFile_.fail() || static_cast<size_t>(outputFile_.gcount()) != length) {
+    outputFile_.clear();
+    throw DiskStorageError("Read failed: Requested " + std::to_string(length) + 
+                            " bytes but read " + std::to_string(outputFile_.gcount()) + 
+                            " from offset " + std::to_string(offset));
+  }
+
+  return buffer;
+}
