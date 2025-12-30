@@ -214,7 +214,6 @@ void TorrentSession::onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> da
   unassignPiece(pieceIndex);
 
   storage_->writePiece(pieceIndex, data);
-
 }
 
 /**

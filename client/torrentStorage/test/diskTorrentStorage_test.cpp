@@ -31,12 +31,13 @@ protected:
   }
 
   // Helper to create dummy TorrentData with just the info needed for storage
-  TorrentData createDummySingleFileTorrent(const std::string& name) {
+  TorrentData createDummySingleFileTorrent(const std::string& name, long long length) {
     TorrentData t;
     BencodeDict info;
     
-    // We only need the "name" field for single-file storage initialization
+    // Need name and length for single file torrents
     info["name"] = makeBencode(name);
+    info["length"] = makeBencode(length);
 
     t.mainData["info"] = makeBencode(std::move(info));
     return t;
@@ -45,7 +46,7 @@ protected:
 
 TEST_F(DiskTorrentStorageTest, singleFileTorrentInitialize_ShouldCreateDirectoryAndFile_WhenDirectoryAndFileDoNotExists) {
   // Create single file torrent
-  TorrentData torrent = createDummySingleFileTorrent(testFilename);
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 1024 * 1024);
   long long pieceLength = 16384; // 16KB
 
   // Initiailize
@@ -72,7 +73,7 @@ TEST_F(DiskTorrentStorageTest, SingleFileTorrentInitialize_ShouldThrowError_When
   ASSERT_TRUE(fs::exists(filePath));
 
   // Create single file torrent with same name
-  TorrentData torrent = createDummySingleFileTorrent(testFilename);
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 1024 * 1024);
   long long pieceLength = 16384;
 
   // Expectation: Should throw runtime_error because the file already exists
@@ -81,9 +82,11 @@ TEST_F(DiskTorrentStorageTest, SingleFileTorrentInitialize_ShouldThrowError_When
   }, std::runtime_error);
 }
 
+// writePiece
+
 TEST_F(DiskTorrentStorageTest, WritePiece_ShouldWriteDataAtCorrectOffset) {
   // Create single file torrent
-  TorrentData torrent = createDummySingleFileTorrent(testFilename);
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 1024 * 1024);
   long long pieceLength = 10; // Small size for easy testing
   
   // Initiailize
@@ -137,7 +140,7 @@ TEST_F(DiskTorrentStorageTest, WritePiece_ShouldThrowError_IfStorageNotInitializ
 
 TEST_F(DiskTorrentStorageTest, WritePiece_ShouldOverwriteExistingData_IfCalledOnTheSameOffsetTwice) {
   // Create single file torrent
-  TorrentData torrent = createDummySingleFileTorrent(testFilename);
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 1024 * 1024);
   long long pieceLength = 10; // Small size for easy testing
   
   // Initiailize
@@ -160,4 +163,83 @@ TEST_F(DiskTorrentStorageTest, WritePiece_ShouldOverwriteExistingData_IfCalledOn
   for (char c : buffer) {
     EXPECT_EQ(c, 'A');
   }
+}
+
+// readPiece
+
+TEST_F(DiskTorrentStorageTest, ReadBlock_ShouldReturnAllAs_WhenCalledOnPieceWrittenWithAllAs) {
+  // Create single file torrent
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 1024);
+  long long pieceLength = 10;
+  
+  // Initialize
+  storage->initialize(torrent, pieceLength, testDir);
+
+  // Write Data all 'A' to Piece 0
+  std::vector<uint8_t> expectedData(10, 'A');
+  storage->writePiece(0, expectedData);
+
+  // Read back the piece (using readBlock for the full piece length)
+  std::vector<uint8_t> readData = storage->readBlock(0, 0, 10);
+
+  // Expectation: Data read back matches data written
+  EXPECT_EQ(readData.size(), 10);
+  for (size_t i = 0; i < readData.size(); ++i) {
+    EXPECT_EQ(readData[i], 'A') << "Mismatch at index " << i;
+  }
+}
+
+TEST_F(DiskTorrentStorageTest, ReadBlock_ShouldReturnCorrectData_WhenReadingSecondPiece) {
+  // Create single file torrent
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 1024);
+  long long pieceLength = 10;
+  
+  // Initialize
+  storage->initialize(torrent, pieceLength, testDir);
+
+  // Write Data all 'B' to Piece 1 (Offset 10-19)
+  std::vector<uint8_t> expectedData(10, 'B');
+  storage->writePiece(1, expectedData);
+
+  // Read back Piece 1
+  std::vector<uint8_t> readData = storage->readBlock(1, 0, 10);
+
+  // Expectation: Data read back matches data written
+  EXPECT_EQ(readData.size(), 10);
+  for (size_t i = 0; i < readData.size(); ++i) {
+    EXPECT_EQ(readData[i], 'B') << "Mismatch at index " << i;
+  }
+}
+
+TEST_F(DiskTorrentStorageTest, ReadBlock_ShouldReturnZeros_WhenReadingUnwrittenData) {
+  // Create single file torrent
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 1024);
+  long long pieceLength = 10;
+  
+  // Initialize
+  storage->initialize(torrent, pieceLength, testDir);
+
+  // Read back Piece 0 without writing anything
+  std::vector<uint8_t> readData = storage->readBlock(0, 0, 10);
+
+  // Expectation: Should return 0s (sparse/pre-allocated)
+  EXPECT_EQ(readData.size(), 10);
+  for (size_t i = 0; i < readData.size(); ++i) {
+    EXPECT_EQ(readData[i], 0) << "Mismatch at index " << i;
+  }
+}
+
+TEST_F(DiskTorrentStorageTest, ReadBlock_ShouldThrowError_WhenReadingPastEndOfFile) {
+  // Create single file torrent, Length 20 bytes
+  TorrentData torrent = createDummySingleFileTorrent(testFilename, 20);
+  long long pieceLength = 10;
+  
+  // Initialize
+  storage->initialize(torrent, pieceLength, testDir);
+
+  // Expectation: An error is thrown since 10 bytes after piece 2 is EOF
+  // Piece 2 (Offset 20, Length 10) = Past EOF
+  EXPECT_THROW({
+    storage->readBlock(2, 0, 10);
+  }, std::runtime_error);
 }

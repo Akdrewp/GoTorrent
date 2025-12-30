@@ -4,6 +4,9 @@
 #include "ITorrentStorage.h"
 #include <fstream>
 #include <string>
+#include <filesystem>
+#include <list>
+#include <unordered_map>
 
 /**
  * @brief Implementation of storage that writes directly to the local disk.
@@ -42,23 +45,55 @@ public:
    */
   std::vector<uint8_t> readBlock(size_t pieceIndex, size_t begin, size_t length) override;
 
+
+  // Struct to hold the data of each file for read and write
+  struct FileEntry {
+    std::filesystem::path path;
+    size_t length;
+    size_t globalOffset;
+  };
+
+  // Pair: <File Path String, File Stream>
+  using FilePoolList = std::list<std::pair<std::string, std::unique_ptr<std::fstream>>>;
+
 private:
 
   /**
-   * @brief Initializes storage for a Single-File torrent.
-   * Creates the necessary directory and opens/creates the output file 
-   * based on the stored outputFilePath_ and std::string downloadDirectory_
+   * @brief Helper to physically create directories and empty files on disk
+   * during initialization.
    */
-  void initializeSingleFile();
+  void createFileStructure();
+
+  /**
+   * @brief Checks if a file exists and throws an error if it does.
+   * Used during initialization to prevent accidental overwrites until resume logic is added.
+   * @param path Path to check.
+   */
+  void handleExistingFile(const std::filesystem::path& path);
 
   /**
    * @brief Reads raw bytes from the file stream at a specific global offset.
    */
   std::vector<uint8_t> readBytes(long long offset, size_t length);
 
+  // Maximum number of files in pool
+  static const size_t MAX_OPEN_FILES = 64;
+
+  /**
+   * @brief Retrieves a pointer to an open file stream for the given path.
+   * If the file is already open, returns it
+   * If not, opens it and closes a file if max files has been reached
+   * @param path The full path to the file.
+   * @return Pointer to the open fstream (owned by the pool).
+   */
+  std::fstream* getFileStream(const std::filesystem::path& path);
+
+  FilePoolList filePool_;
+
+  std::unordered_map<std::string, FilePoolList::iterator> openFilesMap_;
+
+  std::vector<FileEntry> files_;
   std::string downloadDirectory_;
-  std::string outputFilename_;
-  std::fstream outputFile_;
   long long pieceLength_ = 0;
 };
 
