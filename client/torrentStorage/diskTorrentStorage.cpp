@@ -1,6 +1,6 @@
 #include "diskTorrentStorage.h"
 #include "bencode.h"
-#include <iostream>
+#include <spdlog/spdlog.h> 
 #include <stdexcept>
 #include <variant>
 #include <filesystem>
@@ -9,10 +9,6 @@
 namespace fs = std::filesystem;
 
 // Helper Log functions
-
-static void StorageLog(const std::string& message) {
-  std::cout << "Storage: " << message << std::endl;
-}
 
 static std::runtime_error DiskStorageError(const std::string& message) {
   return std::runtime_error("Storage Error: " + message);
@@ -45,8 +41,7 @@ static fs::path getFilePath(const std::string& baseDir, const std::string& head,
 /**
  * @brief Helper for initialize
  * Adds a file to the passed files vector
- * 
- * Increments currentGlobalOffset by file size
+ * * Increments currentGlobalOffset by file size
  */
 static void addFileItemToFiles(
     std::vector<DiskTorrentStorage::FileEntry>& files,
@@ -89,10 +84,10 @@ void DiskTorrentStorage::initialize(const TorrentData& torrent, long long pieceL
 
     for (const auto& fileItem : filesList) {
       addFileItemToFiles(files_, 
-                        currentGlobalOffset, 
-                        fileItem, 
-                        downloadDirectory_, 
-                        rootDirName);
+                         currentGlobalOffset, 
+                         fileItem, 
+                         downloadDirectory_, 
+                         rootDirName);
     }
 
   } else if (infoDict.count("length")) {
@@ -142,7 +137,7 @@ void DiskTorrentStorage::createFileStructure() {
     fs::resize_file(entry.path, entry.length); 
 
   }
-  StorageLog("Initialized storage structure for " + std::to_string(files_.size()) + " files.");
+  spdlog::info("Storage: Initialized storage structure for {} files.", files_.size());
 }
 
 // --- createFileStructure() END ---
@@ -206,10 +201,8 @@ std::fstream* DiskTorrentStorage::getFileStream(const std::filesystem::path& pat
 
 /**
  * @brief Helper for initializeSingleFile()
- * 
- * Creates the output file if it doesn't exist and opens it
- * 
- * @param outputFile The file stream
+ * * Creates the output file if it doesn't exist and opens it
+ * * @param outputFile The file stream
  * @param fullPath Path to file
  */
 static void createAndOpenOutputFile(std::fstream& outputFile, const fs::path& fullPath) {
@@ -219,7 +212,7 @@ static void createAndOpenOutputFile(std::fstream& outputFile, const fs::path& fu
     throw DiskStorageError("File already exists: " + fullPath.string());
   }
 
-  StorageLog("Creating new file...");
+  spdlog::info("Storage: Creating new file...");
 
   // Create empty file and close
   outputFile.open(fullPath, std::ios::binary | std::ios::out);

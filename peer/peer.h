@@ -237,15 +237,7 @@ private:
    * @param pieceIndex index of piece to set in bitfield
    */
   void setHavePiece(uint32_t pieceIndex);
-
-  /**
-   * @brief Logging functions for the peer
-   * 
-   * @param msg Message to log
-   */
-  void log(const std::string& msg) const;
-  void logError(const std::string& msg) const;
-
+  
   // --- Helper Functions End ---
 
   // --- Download State ---

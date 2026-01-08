@@ -3,9 +3,9 @@
 #include "bencode.h"  // For BencodeValue, parseBencodedValue
 #include "httpTrackerClient.h" // For Tracker
 #include "diskTorrentStorage.h" // For storage
+#include "pieceManager.h" // For PieceManager
 
-#include <iostream>    // For std::cout, std::cerr
-#include <iomanip>     // For std::setw, std::hex
+#include <spdlog/spdlog.h> // For logging
 #include <variant>     // For std::visit, std::get_if
 #include <stdexcept>   // For std::runtime_error
 #include <random>      // For std::random_device, std::mt19937
@@ -17,23 +17,16 @@ static constexpr uint32_t BLOCK_SIZE = 16384;
 /**
  * @brief Generates a 20-byte, BEP 20 compliant peer_id.
  * * Format: "-GT0001-<12 random digits>"
- * 
- * BitTorrent specification has a page on "Peer ID Conventions"
+ * * BitTorrent specification has a page on "Peer ID Conventions"
  * https://www.bittorrent.org/beps/bep_0020.html
- * 
- * Using Mainline style:
+ * * Using Mainline style:
  * - Start with dash
- * 
- * GT Two characters to identify client implementation (GoTorrent)
- * 
- * 0001 number representing the version number
- * 
- * - End main with dash
- * 
- * <12 random digits> a string of 12 bytes each a digit
+ * * GT Two characters to identify client implementation (GoTorrent)
+ * * 0001 number representing the version number
+ * * - End main with dash
+ * * <12 random digits> a string of 12 bytes each a digit
  * Using digits to avoid escaping characters
- * 
- * @return A 20-byte string.
+ * * @return A 20-byte string.
  */
 static std::string generatePeerId() {
   const std::string clientPrefix = "-GT0001-";
@@ -81,20 +74,24 @@ void Client::run() {
   // Storage
   auto storage = std::make_shared<DiskTorrentStorage>();
 
+  // Piece Manager (Handles data integrity and storage)
+  // We construct it here to inject into Session
+  auto pieceManager = std::make_shared<PieceManager>(storage, torrent);
+
   // Create the TorrentSession to manage this download
   session_ = std::make_shared<TorrentSession>(
     io_context_, 
-    std::move(torrent), 
+    torrent, // Pass copy/move of torrent data
     peerId_, 
     port_,
     trackerClient,
-    storage
+    pieceManager // Inject the manager
   );
 
   try {
     session_->start();
   } catch (const std::exception& e) {
-    std::cerr << "Failed to start session: " << e.what() << std::endl;
+    spdlog::error("Failed to start session: {}", e.what());
     return;
   }
 
@@ -105,20 +102,20 @@ void Client::run() {
   // This blocks until all work is finished.
   // (Which should never happen since 
   // it calls async reads constantly.)
-  std::cout << "\n--- STARTING ASIO EVENT LOOP ---" << std::endl;
+  spdlog::info("--- STARTING ASIO EVENT LOOP ---");
   try {
     io_context_.run();
   } catch (const std::exception& e) {
-    std::cerr << "Event loop error: " << e.what() << std::endl;
+    spdlog::error("Event loop error: {}", e.what());
   }
-  std::cout << "--- ASIO EVENT LOOP ENDED ---" << std::endl;
+  spdlog::info("--- ASIO EVENT LOOP ENDED ---");
 }
 
 /**
  * @brief Starts the TCP acceptor to listen for new peers (Inbound).
  */
 void Client::startAccepting() {
-  std::cout << "Waiting for inbound connections..." << std::endl;
+  spdlog::info("Waiting for inbound connections...");
   
   // Start an asynchronous accept operation.
   // Completion handler is handleAccept
@@ -138,16 +135,13 @@ void Client::handleAccept(const boost::system::error_code& ec, tcp::socket socke
     if (session_) {
       session_->handleInboundConnection(std::move(socket));
     } else {
-      std::cerr << "Accepted connection but no active session." << std::endl;
+      spdlog::error("Accepted connection but no active session.");
       socket.close();
     }
   } else {
-    std::cerr << "Acceptor error: " << ec.message() << std::endl;
+    spdlog::error("Acceptor error: {}", ec.message());
   }
 
   // Listen for the next connection
-  startAccepting();
-
-  // Listen for the next connection, regardless of what happened
   startAccepting();
 }

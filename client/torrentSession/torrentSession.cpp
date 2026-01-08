@@ -1,11 +1,12 @@
 #include "torrentSession.h"
 #include "bencode.h" // For BencodeValue, printBencodeValue
 #include <iostream>
-#include <iomanip>    // For std::setw, std::hex
 #include <variant>    // For std::visit, std::get_if
 #include <stdexcept>  // For std::runtime_error
 #include <functional> // For std::bind, std::placeholders
 #include <random> // For random
+#include <spdlog/spdlog.h>
+#include <spdlog/fmt/bin_to_hex.h>
 
 // --- TorrentSession class ---
 
@@ -27,11 +28,10 @@ TorrentSession::TorrentSession(
 
 /**
  * @brief Starts the session
- * 
- * Loads torrent info, contacts and connects to peer
+ * * Loads torrent info, contacts and connects to peer
  */
 void TorrentSession::start() {
-  std::cout << "--- Starting Torrent Session ---" << std::endl;
+  spdlog::info("--- Starting Torrent Session ---");
   loadTorrentInfo();
   requestPeers();
   connectToPeers();
@@ -41,10 +41,8 @@ void TorrentSession::start() {
 
 /**
  * Helper function for loadTorrentInfo
- * 
- * @brief Extracts the piece length from the info dictionary.
- * 
- * @param infoDict The BencodeDict from .torrent file
+ * * @brief Extracts the piece length from the info dictionary.
+ * * @param infoDict The BencodeDict from .torrent file
  */
 static long long getTorrentPieceLength(const BencodeDict& infoDict) {
   if (infoDict.count("piece length")) {
@@ -87,12 +85,8 @@ void TorrentSession::loadTorrentInfo() {
   pieceAvailability_.resize(numPieces_, 0);
 
   // Print the hash
-  std::cout << "--- INFO HASH ---" << std::endl;
-  std::cout << std::hex << std::setfill('0');
-  for (unsigned char c : torrent_.infoHash) {
-    std::cout << std::setw(2) << static_cast<int>(c);
-  }
-  std::cout << std::dec << std::endl;
+  spdlog::info("--- INFO HASH ---");
+  spdlog::info("{:n}", spdlog::to_hex(torrent_.infoHash));
 }
 
 void TorrentSession::requestPeers() {
@@ -112,16 +106,16 @@ void TorrentSession::requestPeers() {
   );
 
   // Print request details
-  std::cout << "\n--- PREPARING TRACKER REQUEST ---" << std::endl;
-  std::cout << "Announce URL: " << announceUrl << std::endl;
-  std::cout << "Total Length (left): " << totalLength_ << std::endl;
+  spdlog::info("--- PREPARING TRACKER REQUEST ---");
+  spdlog::info("Announce URL: {}", announceUrl);
+  spdlog::info("Total Length (left): {}", totalLength_);
 
-  std::cout << "\n--- SENDING REQUEST TO TRACKER ---" << std::endl;
-  std::string trackerResponse = trackerClient_.get()->sendRequest(trackerUrl);
-  std::cout << "Tracker raw response size: " << trackerResponse.size() << " bytes" << std::endl;
+  spdlog::info("--- SENDING REQUEST TO TRACKER ---");
+  std::string trackerResponse = trackerClient_->sendRequest(trackerUrl);
+  spdlog::info("Tracker raw response size: {} bytes", trackerResponse.size());
 
   // Parse the tracker's response
-  std::cout << "\n--- PARSING TRACKER RESPONSE ---" << std::endl;
+  spdlog::info("--- PARSING TRACKER RESPONSE ---");
   size_t index = 0;
   std::vector<char> responseBytes(trackerResponse.begin(), trackerResponse.end());
   BencodeValue parsedResponse = parseBencodedValue(responseBytes, index);
@@ -130,7 +124,7 @@ void TorrentSession::requestPeers() {
   std::cout << std::endl;
 
   // Get peer list
-  std::cout << "\n--- PARSED PEER LIST ---" << std::endl;
+  spdlog::info("--- PARSED PEER LIST ---");
   const auto& respDict = parsedResponse.get<BencodeDict>();
 
   if (respDict.count("failure reason")) {
@@ -159,11 +153,11 @@ static std::shared_ptr<Peer> initPeer(asio::io_context& io_context, std::string 
 
 void TorrentSession::connectToPeers() {
   if (trackerPeers_.empty()) {
-    std::cout << "\nNo peers found from tracker." << std::endl;
+    spdlog::warn("No peers found from tracker.");
     return;
   }
 
-  std::cout << "\n--- CONNECTING TO PEERS ---" << std::endl;
+  spdlog::info("--- CONNECTING TO PEERS ---");
   using namespace std::placeholders; // for _1, _2
 
   // Try to connect to every peer
@@ -172,7 +166,7 @@ void TorrentSession::connectToPeers() {
     // Create peer
     auto peer = initPeer(io_context_, peerInfo.ip, peerInfo.port);
 
-    std::cout << "Attempting async connect to " << peerInfo.ip << ":" << peerInfo.port << std::endl;
+    spdlog::info("Attempting async connect to {}:{}", peerInfo.ip, peerInfo.port);
 
     // This sends bitfield, waits for reply and completes handshake
     peer->startAsOutbound(
@@ -185,13 +179,11 @@ void TorrentSession::connectToPeers() {
     activePeers_.push_back(peer);
   }
   
-  std::cout << "--- CONNECTED TO " << activePeers_.size() << " PEERS ---" << std::endl;
+  spdlog::info("--- CONNECTED TO {} PEERS ---", activePeers_.size());
 }
 
 void TorrentSession::handleInboundConnection(tcp::socket socket) {
-  std::cout << "\n--- INBOUND CONNECTION from " 
-            << socket.remote_endpoint().address().to_string() 
-            << " ---" << std::endl;
+  spdlog::info("--- INBOUND CONNECTION from {} ---", socket.remote_endpoint().address().to_string());
   
   // Create Connection
   auto conn = std::make_shared<PeerConnection>(io_context_, std::move(socket));
@@ -214,6 +206,7 @@ void TorrentSession::onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> da
   unassignPiece(pieceIndex);
 
   storage_->writePiece(pieceIndex, data);
+
 }
 
 /**
@@ -319,11 +312,9 @@ static std::vector<size_t> getSortedCandidatePieces(
 
 /**
  * @brief Gets top randomVariance pieces from pieces array and returns one at random
- * 
- * @param pieces The pieces array sorted from most to least rare
+ * * @param pieces The pieces array sorted from most to least rare
  * @param randomVariance How many pieces to choose from the top
- * 
- * @returns The index of randomly chosen piece
+ * * @returns The index of randomly chosen piece
  */
 static size_t getTopRandomPiece(std::vector<size_t> pieces, int randomVariance) {
   size_t poolSize = std::min(pieces.size(), static_cast<size_t>(randomVariance));
@@ -334,18 +325,16 @@ static size_t getTopRandomPiece(std::vector<size_t> pieces, int randomVariance) 
 
   size_t chosenIndex = pieces[dis(gen)];
 
-  std::cout << "--- SESSION: Assigning piece " << chosenIndex;
+  spdlog::info("--- SESSION: Assigning piece {}", chosenIndex);
   
   return chosenIndex;
 }
 
 /**
  * @brief Finds the best piece for the peer to start requesting
- * 
- * Uses the Rarest first strategy:
+ * * Uses the Rarest first strategy:
  * Selects the piece that the least amount of peers have
- * 
- * @param peer The peer to assign a piece to
+ * * @param peer The peer to assign a piece to
  */
 std::optional<size_t> TorrentSession::assignWorkForPeer(std::shared_ptr<Peer> peer) {
   // Rarest First with Randomness
@@ -367,7 +356,7 @@ std::optional<size_t> TorrentSession::assignWorkForPeer(std::shared_ptr<Peer> pe
 
   int chosenPieceIndex = getTopRandomPiece(sortedPieces, 1); // Random variance = 1 for now
 
-  std::cout << "--- SESSION: Assigning piece " << chosenPieceIndex;
+  spdlog::info("--- SESSION: Assigning piece {}", chosenPieceIndex);
 
   // Lock the piece so no one else picks it
   assignedPieces_.insert(chosenPieceIndex);
@@ -380,7 +369,7 @@ std::optional<size_t> TorrentSession::assignWorkForPeer(std::shared_ptr<Peer> pe
  */
 void TorrentSession::unassignPiece(size_t pieceIndex) {
   if (assignedPieces_.count(pieceIndex)) {
-    std::cout << "--- SESSION: Un-assigning piece " << pieceIndex << " ---" << std::endl;
+    spdlog::info("--- SESSION: Un-assigning piece {} ---", pieceIndex);
     assignedPieces_.erase(pieceIndex);
   }
 }

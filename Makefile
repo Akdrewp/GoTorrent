@@ -17,7 +17,7 @@ CXXFLAGS = -g -Wall -std=c++17
 # OpenSSL
 # cURL
 # boost
-LIBS = -lcrypto -lcurl -lboost_system
+LIBS = -lcrypto -lcurl -lspdlog -lboost_system
 # Add libraries for testing
 # GoogleTest
 # GoogleMock

@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cstring> // For memcpy
 #include <openssl/sha.h>
+#include <spdlog/spdlog.h>
 
 // CONSTANTS
 
@@ -16,16 +17,6 @@ static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
 Peer::Peer(std::shared_ptr<PeerConnection> conn, std::string ip)
   : conn_(std::move(conn)), ip_(std::move(ip))
 {
-}
-
-// --- Logging helpers ---
-
-void Peer::log(const std::string& msg) const {
-    std::cout << "[" << ip_ << "] " << msg << std::endl;
-}
-
-void Peer::logError(const std::string& msg) const {
-    std::cerr << "[" << ip_ << "] " << msg << std::endl;
 }
 
 // --- STARTUP LOGIC ---
@@ -92,12 +83,12 @@ void Peer::startAsInbound(
 
 void Peer::onHandshakeComplete(const boost::system::error_code& ec, std::vector<unsigned char> peerId) {
   if (ec) {
-    logError("Logic: Handshake failed.");
+    spdlog::error("[{}] Logic: Handshake failed.", ip_);
     // Connection is already closed by PeerConnection. We just stop.
     return;
   }
 
-  log("Logic: Handshake complete. Sending bitfield.");
+  spdlog::info("[{}] Logic: Handshake complete. Sending bitfield.", ip_);
   // @TODO: Store their peerId maybe for console logging
   
   // Now that handshake is done, send our bitfield.
@@ -112,12 +103,12 @@ void Peer::onHandshakeComplete(const boost::system::error_code& ec, std::vector<
  */
 void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<PeerMessage> msg) {
   if (ec) {
-    logError("Logic: Disconnected (" + ec.message() + ")");
+    spdlog::error("[{}] Logic: Disconnected ({})", ip_, ec.message());
 
     // If we were working on a piece, release the lock
     if (auto session = session_.lock()) {
       if (nextBlockOffset_ > 0 && nextBlockOffset_ < currentPieceBuffer_.size()) {
-        log("Disconnected, un-assigning piece " + std::to_string(nextPieceIndex_));
+        spdlog::info("[{}] Disconnected, un-assigning piece {}", ip_, nextPieceIndex_);
         session->unassignPiece(nextPieceIndex_);
       }
     }
@@ -141,7 +132,7 @@ void Peer::sendBitfield() {
   if (auto session = session_.lock()) {
     std::vector<unsigned char> payload = session->getBitfield();
     conn_->sendMessage(5, payload); // ID 5 = bitfield, 
-    log("Sent bitfield (" + std::to_string(payload.size()) + " bytes)");
+    spdlog::info("[{}] Sent bitfield ({} bytes)", ip_, payload.size());
   }
 }
 
@@ -150,8 +141,7 @@ void Peer::sendInterested() {
 }
 
 void Peer::sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length) {
-  std::cout << "Sending REQUEST for piece " << pieceIndex 
-            << " (begin: " << begin << ", length: " << length << ")" << std::endl;
+  spdlog::info("[{}] Sending REQUEST for piece {} (begin: {}, length: {})", ip_, pieceIndex, begin, length);
             
   // Payload is 12 bytes: index, begin, length
   std::vector<uint8_t> payload(12);
@@ -205,7 +195,7 @@ bool Peer::assignNewPiece(std::shared_ptr<ITorrentSession> session) {
   // We have a piece
 
   nextPieceIndex_ = *assignedPiece;
-  log("Session assigned us piece: " + std::to_string(nextPieceIndex_));
+  spdlog::info("[{}] Session assigned us piece: {}", ip_, nextPieceIndex_);
 
   long long pieceLength = session->getPieceLength();
   long long totalLength = session->getTotalLength();
@@ -216,11 +206,9 @@ bool Peer::assignNewPiece(std::shared_ptr<ITorrentSession> session) {
 
   // Verify piece is inbounds
   if (totalDownloaded >= totalLength) {
-    std::string err = "Critical: Assigned piece index " + std::to_string(nextPieceIndex_) + 
-                      " starts at " + std::to_string(totalDownloaded) + 
-                      " which is >= total length " + std::to_string(totalLength);
-    logError(err);
-    throw std::runtime_error(err);
+    spdlog::error("[{}] Critical: Assigned piece index {} starts at {} which is >= total length {}", 
+                 ip_, nextPieceIndex_, totalDownloaded, totalLength);
+    throw std::runtime_error("Assigned piece out of bounds");
   }
 
   if (totalDownloaded + thisPieceLength > totalLength) {
@@ -248,8 +236,7 @@ void Peer::requestNextBlock(long long pieceLength) {
   }
   
   // Send the request
-  std::cout << "[" << ip_ << "] --- ACTION: Requesting piece " << nextPieceIndex_ 
-            << ", Block offset " << nextBlockOffset_ << " ---" << std::endl;
+  spdlog::info("[{}] --- ACTION: Requesting piece {}, Block offset {} ---", ip_, nextPieceIndex_, nextBlockOffset_);
             
   sendRequest(
       static_cast<uint32_t>(nextPieceIndex_), // pieceIndex
@@ -322,7 +309,7 @@ void Peer::requestPiece() {
 
 void Peer::setAmInterested(bool interested) {
   if (interested && !amInterested_) {
-    log("Session says we are interested. Sending INTERESTED.");
+    spdlog::info("[{}] Session says we are interested. Sending INTERESTED.", ip_);
     sendInterested();
     amInterested_ = true;
   } else if (!interested && amInterested_) {
@@ -355,7 +342,7 @@ void Peer::handleMessage(PeerMessage msg) {
     // piece: <len=0009+X><id=7><index><begin><block>
     case 7: handlePiece(msg); break;
     default:
-      log("Received unhandled message. ID: " + std::to_string((int)msg.id));
+      spdlog::warn("[{}] Received unhandled message. ID: {}", ip_, (int)msg.id);
   }
 }
 
@@ -371,12 +358,12 @@ void Peer::handleMessage(PeerMessage msg) {
  * Any existing messages should be considered to be discarded
  */
 void Peer::handleChoke() {
-  log("Received CHOKE");
+  spdlog::info("[{}] Received CHOKE", ip_);
   peerChoking_ = true;
 
   // Clear the requests and reset block offset
   if (!inFlightRequests_.empty()) {
-    log("Peer choked us, clearing requests.");
+    spdlog::info("[{}] Peer choked us, clearing requests.", ip_);
 
     int inFlightRequestCount = inFlightRequests_.size();
     inFlightRequests_.clear();
@@ -395,7 +382,7 @@ void Peer::handleChoke() {
  * An unchoke message means a peer is ready to recieve messages
  */
 void Peer::handleUnchoke() {
-  log("Received UNCHOKE");
+  spdlog::info("[{}] Received UNCHOKE", ip_);
   peerChoking_ = false;
 }
 
@@ -408,7 +395,7 @@ void Peer::handleUnchoke() {
  */
 void Peer::handleHave(const PeerMessage& msg) {
   if (msg.payload.size() != 4) {
-    logError("Invalid HAVE message payload size: "+ std::to_string(msg.payload.size()));
+    spdlog::error("[{}] Invalid HAVE message payload size: {}", ip_, msg.payload.size());
     return;
   }
   
@@ -416,7 +403,7 @@ void Peer::handleHave(const PeerMessage& msg) {
   memcpy(&pieceIndex, msg.payload.data(), 4);
   pieceIndex = ntohl(pieceIndex);
 
-  log("Received HAVE for piece " + std::to_string(pieceIndex));
+  spdlog::info("[{}] Received HAVE for piece {}", ip_, pieceIndex);
   
   // Update local bitfield state
   setHavePiece(pieceIndex);
@@ -435,7 +422,7 @@ void Peer::handleHave(const PeerMessage& msg) {
  * A have message means this peer has this signified piece
  */
 void Peer::handleBitfield(const PeerMessage& msg) {
-  log("Received BITFIELD (" + std::to_string(msg.payload.size()) + " bytes)");
+  spdlog::info("[{}] Received BITFIELD ({} bytes)", ip_, msg.payload.size());
 
   // Update local bitfield state
   bitfield_ = msg.payload;
@@ -493,23 +480,23 @@ bool Peer::saveBlockToBuffer(uint32_t pieceIndex, uint32_t begin, const std::vec
   if (pieceIndex == nextPieceIndex_ && (begin + blockLength) <= currentPieceBuffer_.size()) {
     const unsigned char* blockData = payload.data() + 8;
     memcpy(&currentPieceBuffer_[begin], blockData, blockLength);
-    log("   Saved " + std::to_string(blockLength) + " bytes to piece buffer.");
+    spdlog::info("[{}] Saved {} bytes to piece buffer.", ip_, blockLength);
     return true;
   } else {
-    log("   WARNING: Received piece data for wrong piece/offset. Discarding.");
+    spdlog::warn("[{}]    WARNING: Received piece data for wrong piece/offset. Discarding.", ip_);
     return false;
   }
 }
 
 void Peer::completePiece(uint32_t pieceIndex) {
-  log("COMPLETED PIECE " + std::to_string(pieceIndex) + " (all blocks received)!");
+  spdlog::info("[{}] COMPLETED PIECE {} (all blocks received)!", ip_, pieceIndex);
 
   auto session = session_.lock();
   if (!session) return; 
 
   // Verify hash
   if (verifyPieceHash(pieceIndex, session)) {
-    log("HASH OK for piece " + std::to_string(pieceIndex));
+    spdlog::info("[{}] HASH OK for piece {}", ip_, pieceIndex);
     
     // Set client bitfield
     session->updateMyBitfield(pieceIndex);
@@ -525,28 +512,27 @@ void Peer::completePiece(uint32_t pieceIndex) {
 
   } else {
     failedHashCount_++;
-    logError("*** HASH FAILED *** for piece " + std::to_string(pieceIndex) + 
-             " (Strike " + std::to_string(failedHashCount_) + "/" + std::to_string(MAX_BAD_HASHES) + ")");
+    spdlog::error("[{}] *** HASH FAILED *** for piece {} (Strike {}/{})", ip_, pieceIndex, failedHashCount_, (int)MAX_BAD_HASHES);
 
-    if (failedHashCount_ >= MAX_BAD_HASHES) {
-        logError("Too many hash failures. Disconnecting peer.");
-        // Close the connection with a protocol error.
-        // This will trigger onMessageReceived with the error, which cleans up the session state.
-        conn_->close(boost::system::errc::make_error_code(boost::system::errc::protocol_error));
-        return; 
-    }
-    // Discard data and reset to re-download this piece
-    nextBlockOffset_ = 0;
-    currentPieceBuffer_.clear();
+  if (failedHashCount_ >= MAX_BAD_HASHES) {
+    // Close the connection with a protocol error.
+    // This will trigger onMessageReceived with the error, which cleans up the session state.
+    conn_->close(boost::system::errc::make_error_code(boost::system::errc::protocol_error));
+    spdlog::error("[{}] Too many hash failures. Disconnecting peer.", ip_);
+    return; 
+  }
+  // Discard data and reset to re-download this piece
+  nextBlockOffset_ = 0;
+  currentPieceBuffer_.clear();
 
-    // Unassign piece so others can grab it (or we grab it again later)
-    session->unassignPiece(pieceIndex);
+  // Unassign piece so others can grab it (or we grab it again later)
+  session->unassignPiece(pieceIndex);
   }
 }
 
 void Peer::handlePiece(const PeerMessage& msg) {
   if (msg.payload.size() < 8) {
-    logError("Invalid PIECE message payload size: " + std::to_string(msg.payload.size()));
+    spdlog::error("[{}] Invalid PIECE message payload size: {}", ip_, msg.payload.size());
     return;
   }
 
@@ -558,9 +544,9 @@ void Peer::handlePiece(const PeerMessage& msg) {
   begin = ntohl(begin);
   size_t blockLength = msg.payload.size() - 8;
 
-  log("Received PIECE: Index=" + std::to_string(pieceIndex));
-  log("Begin=" + std::to_string(begin));
-  log("Length=" + std::to_string(blockLength));
+  spdlog::info("[{}] Received PIECE: Index={}", ip_, pieceIndex);
+  spdlog::info("[{}] Begin={}", ip_, begin);
+  spdlog::info("[{}] Length={}", ip_, blockLength);
 
   // Find this block from our in-flight list
   auto it = std::find_if(inFlightRequests_.begin(), inFlightRequests_.end(), 
@@ -571,7 +557,7 @@ void Peer::handlePiece(const PeerMessage& msg) {
     });
 
   if (it == inFlightRequests_.end()) {
-    logError("  ERROR: Received a PIECE that doesn't match any request.");
+    spdlog::error("[{}]   ERROR: Received a PIECE that doesn't match any request.", ip_);
     return;
   }
 
@@ -619,11 +605,11 @@ bool Peer::clientHasPiece(size_t pieceIndex) const {
  */
 bool Peer::verifyPieceHash(size_t pieceIndex, std::shared_ptr<ITorrentSession> session) {
   if (!session) {
-    logError("ERROR: Cannot verify hash, no session.");
+    spdlog::error("[{}] ERROR: Cannot verify hash, no session.", ip_);
     return false;
   }
   if (currentPieceBuffer_.empty()) {
-    logError("ERROR: Cannot verify hash, piece buffer is empty.");
+    spdlog::error("[{}] ERROR: Cannot verify hash, piece buffer is empty.", ip_);
     return false;
   }
   
