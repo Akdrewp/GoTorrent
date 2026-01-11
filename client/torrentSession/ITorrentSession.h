@@ -26,8 +26,9 @@ public:
      *
      * @param pieceIndex The zero-based index of the completed piece.
      * @param data The raw bytes of the completed piece.
+     * @returns true if piece save was successful
      */
-    virtual void onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data) = 0;
+    virtual bool onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data) = 0;
 
     /**
      * @brief Called when a peer sends its initial BITFIELD message.

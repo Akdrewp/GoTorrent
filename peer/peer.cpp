@@ -1,5 +1,6 @@
 #include "peer.h"
 #include "ITorrentSession.h" 
+#include "IPieceManager.h" 
 #include <iostream>
 #include <stdexcept>
 #include <cstring> // For memcpy
@@ -14,10 +15,19 @@ static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
 /**
  * @brief Constructor for a peer
  */
-Peer::Peer(std::shared_ptr<PeerConnection> conn, std::string ip)
-  : conn_(std::move(conn)), ip_(std::move(ip))
+Peer::Peer(
+  std::shared_ptr<PeerConnection> conn, 
+  std::string ip, 
+  std::shared_ptr<IPieceManager> pieceManager
+) : conn_(std::move(conn)), 
+    ip_(std::move(ip)), 
+    pieceManager_(std::move(pieceManager))
 {
+  if (!pieceManager_) {
+    throw std::runtime_error("Peer initialized without PieceManager");
+  }
 }
+
 
 // --- STARTUP LOGIC ---
 

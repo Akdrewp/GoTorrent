@@ -12,8 +12,9 @@
 namespace asio = boost::asio;
 using asio::ip::tcp;
 
-// Forward declaration for ITorrentSession defined in ITorrentSession.h
+// Forward declarations
 class ITorrentSession;
+class PieceManager;
 
 /**
  * @brief Holds info about a block request we are waiting for.
@@ -32,8 +33,15 @@ public:
 
   /**
    * @brief Constructor for peer
+   * @param conn The connection wrapper
+   * @param ip The IP address (for logging)
+   * @param pieceManager The shared piece manager resource
    */
-  Peer(std::shared_ptr<PeerConnection> conn, std::string ip);
+  Peer(
+    std::shared_ptr<PeerConnection> conn, 
+    std::string ip, 
+    std::shared_ptr<IPieceManager> pieceManager
+  );
 
   /**
    * @brief Starts the connection process for an OUTBOUND connection.
@@ -255,7 +263,8 @@ private:
   std::shared_ptr<PeerConnection> conn_; // Socket connection layer
   std::string ip_; // For console logging
 
-  // --- Session ---
+  // --- Dependencies ---
+  std::shared_ptr<IPieceManager> pieceManager_;
   std::weak_ptr<ITorrentSession> session_;
 
   /** @brief Bitfield of the peer */

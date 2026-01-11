@@ -32,7 +32,8 @@ INC_DIRS = -Isrc \
            -Iclient \
            -Ipeer \
            -Iclient/torrentStorage \
-           -Iclient/torrentSession
+           -Iclient/torrentSession \
+           -Iclient/pieceManager
 CXXFLAGS += $(INC_DIRS)
 
 # 4. Targets
@@ -54,7 +55,8 @@ CLIENT_SRCS = $(wildcard src/*.cpp) \
               $(wildcard client/*.cpp) \
               $(wildcard peer/*.cpp) \
               $(wildcard client/torrentStorage/*.cpp) \
-              $(wildcard client/torrentSession/*.cpp)
+              $(wildcard client/torrentSession/*.cpp) \
+              $(wildcard client/pieceManager/*.cpp)
 CLIENT_OBJS = $(CLIENT_SRCS:.cpp=.o)
 
 # Define source files for the TESTS
@@ -68,7 +70,8 @@ TEST_SRCS = bencode/test/bencode_test.cpp \
             client/torrentSession/torrentSession.cpp \
             tracker/tracker.cpp \
             torrent/torrent.cpp \
-            client/torrentStorage/diskTorrentStorage.cpp
+            client/torrentStorage/diskTorrentStorage.cpp \
+            client/pieceManager/pieceManager.cpp
 
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 

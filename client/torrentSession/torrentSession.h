@@ -2,7 +2,7 @@
 #define TORRENT_SESSION_H
 
 #include "ITorrentSession.h"
-#include "ITorrentStorage.h"
+#include "pieceManager.h" 
 #include "httpTrackerClient.h"
 #include "torrent.h"
 #include "tracker.h"
@@ -39,7 +39,7 @@ public:
     std::string& peerId,
     unsigned short port,
     std::shared_ptr<ITrackerClient> trackerClient,
-    std::shared_ptr<ITorrentStorage> storage
+    std::shared_ptr<PieceManager> pieceManager
   );
 
   /**
@@ -59,7 +59,11 @@ public:
 
   // --- PUBLIC CALLBACKS (called by Peer) ---
 
-  void onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data);
+  /**
+   * @brief Called after recieving a piece
+   * @returns true if PieceManagaer succesfully verified and saved the data
+   */
+  bool onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data);
   void onBitfieldReceived(std::shared_ptr<Peer> peer, std::vector<uint8_t> bitfield);
   void onHaveReceived(std::shared_ptr<Peer> peer, size_t pieceIndex);
   std::optional<size_t> assignWorkForPeer(std::shared_ptr<Peer> peer);
@@ -108,19 +112,11 @@ private:
   
   // --- Torrent Info ---
   TorrentData torrent_;
-  long long pieceLength_ = 0;
-  long long totalLength_ = 0;
-  size_t numPieces_ = 0;
-  std::vector<uint8_t> myBitfield_; // Client bitfield
-  std::string pieceHashes_;         // Raw 20-byte SHA1 hashes
 
-  // Dependencies
+  // --- Dependencies ---
   std::shared_ptr<ITrackerClient> trackerClient_;
-  std::shared_ptr<ITorrentStorage> storage_;
 
-  // --- File Info ---
-  std::string outputFilename_;
-  std::fstream outputFile_;
+  std::shared_ptr<PieceManager> pieceManager_;
 
   // --- Peer & Piece Management ---
   std::set<size_t> assignedPieces_;

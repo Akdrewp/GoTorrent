@@ -5,7 +5,9 @@
 #include "diskTorrentStorage.h" // For storage
 #include "pieceManager.h" // For PieceManager
 
-#include <spdlog/spdlog.h> // For logging
+#include "spdlog/spdlog.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+#include "spdlog/sinks/basic_file_sink.h"
 #include <variant>     // For std::visit, std::get_if
 #include <stdexcept>   // For std::runtime_error
 #include <random>      // For std::random_device, std::mt19937
@@ -60,7 +62,26 @@ Client::Client(asio::io_context& io_context, std::string torrentFilePath)
 // in client.h.
 Client::~Client() = default;
 
+
+// Initialize logging for app
+void initLogging() {
+  auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+  auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("bittorrent.log", true);
+  
+  // Combine sinks into one logger
+  std::vector<spdlog::sink_ptr> sinks {console_sink, file_sink};
+  auto logger = std::make_shared<spdlog::logger>("global", sinks.begin(), sinks.end());
+  
+  // Set pattern: [Time] [Level] Message
+  logger->set_pattern("[%H:%M:%S] [%^%l%$] %v");
+  
+  // REGISTER IT AS GLOBAL
+  spdlog::set_default_logger(logger);
+}
+
 void Client::run() {
+
+  initLogging();
 
   // Parse the torrent file
   TorrentData torrent = parseTorrentFile(torrentFilePath_);
