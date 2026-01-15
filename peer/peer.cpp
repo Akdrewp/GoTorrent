@@ -1,31 +1,25 @@
 #include "peer.h"
-#include "ITorrentSession.h" 
-#include "IPieceManager.h" 
-#include <iostream>
-#include <stdexcept>
-#include <cstring> // For memcpy
-#include <openssl/sha.h>
 #include <spdlog/spdlog.h>
+#include <cstring>
+#include <algorithm>
+#include <arpa/inet.h>
 
 // CONSTANTS
 
 // Standard block size
 static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
 
-/**
- * @brief Constructor for a peer
- */
 Peer::Peer(
-  std::shared_ptr<PeerConnection> conn, 
-  std::string ip, 
-  std::shared_ptr<IPieceManager> pieceManager
+    std::shared_ptr<PeerConnection> conn, 
+    std::string ip, 
+    std::shared_ptr<IPieceRepository> repo,
+    std::shared_ptr<IPiecePicker> picker
 ) : conn_(std::move(conn)), 
     ip_(std::move(ip)), 
-    pieceManager_(std::move(pieceManager))
+    repo_(std::move(repo)), 
+    picker_(std::move(picker)) 
 {
-  if (!pieceManager_) {
-    throw std::runtime_error("Peer initialized without PieceManager");
-  }
+    if (!repo_ || !picker_) throw std::runtime_error("Peer dependencies cannot be null");
 }
 
 
@@ -116,11 +110,13 @@ void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<
     spdlog::error("[{}] Logic: Disconnected ({})", ip_, ec.message());
 
     // If we were working on a piece, release the lock
-    if (auto session = session_.lock()) {
-      if (nextBlockOffset_ > 0 && nextBlockOffset_ < currentPieceBuffer_.size()) {
-        spdlog::info("[{}] Disconnected, un-assigning piece {}", ip_, nextPieceIndex_);
-        session->unassignPiece(nextPieceIndex_);
-      }
+    if (!bitfield_.empty()) {
+      picker_->processPeerDisconnect(bitfield_);
+    }
+
+    if (nextBlockOffset_ > 0 || !inFlightRequests_.empty()) {
+      spdlog::info("[{}] Disconnected, un-assigning piece {}", ip_, nextPieceIndex_);
+      picker_->onPieceFailed(nextPieceIndex_);
     }
 
     // We are disconnected stop
@@ -140,7 +136,7 @@ void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<
 
 void Peer::sendBitfield() {
   if (auto session = session_.lock()) {
-    std::vector<unsigned char> payload = session->getBitfield();
+    std::vector<unsigned char> payload = repo_->getBitfield();
     conn_->sendMessage(5, payload); // ID 5 = bitfield, 
     spdlog::info("[{}] Sent bitfield ({} bytes)", ip_, payload.size());
   }
@@ -188,56 +184,56 @@ void Peer::doAction() {
 
 /**
  * @brief Helper for requestPiece
+ * Assigns peer a new piece
  * 
- * Gets a new piece from session and resizes the buffer accordingly
- * 
- * @param session The session object
+ * 1. Gets client bitfield
+ * 2. Pass peer bitfield and clientBitfield to piecePicker
+ * 3. Assigns nextPieceIndex to returned piece
+ * 4. Sets and resizes buffers according to which piece
  */
-bool Peer::assignNewPiece(std::shared_ptr<ITorrentSession> session) {
-  // Get assigned piece from session
-  std::optional<size_t> assignedPiece = session->assignWorkForPeer(shared_from_this());
+bool Peer::assignNewPiece() {
+  // 1. Get our current inventory
+  auto clientBitfield = repo_->getBitfield();
 
-  if (!assignedPiece) {
-    // Session tell us there's no work to be done
-    return false; // Stop trying to request
+  // 2. Ask the Picker for a job
+  auto assignment = picker_->pickPiece(bitfield_, clientBitfield);
+
+  if (!assignment) return false; // Nothing to do
+
+  // 3. Assign nextPiece
+  nextPieceIndex_ = *assignment;
+  spdlog::info("[{}] Picker assigned piece: {}", ip_, nextPieceIndex_);
+
+  // 4. Setup and resize buffers
+  size_t pieceLen = repo_->getPieceLength();
+  size_t totalLen = repo_->getTotalLength();
+  
+  size_t thisLen = pieceLen;
+
+  // Last piece has length of data left in torrent
+  // Ex. Piece length is 10 and total length is 25 then last piece is 5
+  if ((nextPieceIndex_ * pieceLen) + thisLen > totalLen) { //If last piece
+    thisLen = totalLen - (nextPieceIndex_ * pieceLen);
   }
 
-  // We have a piece
-
-  nextPieceIndex_ = *assignedPiece;
-  spdlog::info("[{}] Session assigned us piece: {}", ip_, nextPieceIndex_);
-
-  long long pieceLength = session->getPieceLength();
-  long long totalLength = session->getTotalLength();
-
-  long long thisPieceLength = pieceLength;
-
-  long long totalDownloaded = (long long)nextPieceIndex_ * pieceLength;
-
-  // Verify piece is inbounds
-  if (totalDownloaded >= totalLength) {
-    spdlog::error("[{}] Critical: Assigned piece index {} starts at {} which is >= total length {}", 
-                 ip_, nextPieceIndex_, totalDownloaded, totalLength);
-    throw std::runtime_error("Assigned piece out of bounds");
-  }
-
-  if (totalDownloaded + thisPieceLength > totalLength) {
-      thisPieceLength = totalLength - totalDownloaded;
-  }
-  currentPieceBuffer_.resize(thisPieceLength);
-
+  currentPieceBuffer_.clear();
+  currentPieceBuffer_.resize(thisLen);
+  nextBlockOffset_ = 0;
+  
   return true;
 }
 
 /**
  * @brief Helper for requestPiece
  * 
- * Sends a request for the next block in the piece
+ * Called when peer has a piece to download
  * 
+ * 1. Sends a request for the next block in the piece through network
+ * 2. Adds requested piece to buffer
+ * 3. Advances next block offset
  * @param pieceLength The length of the current assigned piece
  */
 void Peer::requestNextBlock(long long pieceLength) {
-  // Client have a piece to download
   uint32_t blockLength = BLOCK_SIZE;
   
   // TODO: Need to handle the last piece/block, which might be shorter.
@@ -249,16 +245,16 @@ void Peer::requestNextBlock(long long pieceLength) {
   spdlog::info("[{}] --- ACTION: Requesting piece {}, Block offset {} ---", ip_, nextPieceIndex_, nextBlockOffset_);
             
   sendRequest(
-      static_cast<uint32_t>(nextPieceIndex_), // pieceIndex
-      nextBlockOffset_,                      // begin
-      blockLength                            // length
+    static_cast<uint32_t>(nextPieceIndex_), // pieceIndex
+    nextBlockOffset_,                      // begin
+    blockLength                            // length
   );
 
   // Add this to our in-flight list
   inFlightRequests_.push_back(PendingRequest{
-      static_cast<uint32_t>(nextPieceIndex_),
-      nextBlockOffset_,
-      blockLength
+    static_cast<uint32_t>(nextPieceIndex_),
+    nextBlockOffset_,
+    blockLength
   });
 
   // Advance to the next block
@@ -268,52 +264,42 @@ void Peer::requestNextBlock(long long pieceLength) {
 /**
  * @brief Fills the request pipeline for the current piece
  * 
- * If there is no current piece asks session to assign one
- *
- * It finds the first piece the peer has that we don't,
- * and then requests all blocks for that piece.
- * 
- * Filling up the request pipeline
- * 
+ * loop until MAX_PIPELINE_SIZE has been reacher
+ *   1. Gets piece from piecePicker if not currently assigned
+ *   2. Check if all blocks have been requested for piece
+ *   3. Send block request
  */
 void Peer::requestPiece() {
 
-  // Get session
-  auto session = session_.lock();
-  if (!session) {
-    return; // Session is gone
-  }
+  if (session_.expired()) return;
 
-  // Fill the pipeline up to MAX_PIPELINE_SIZE
+  // Loop until pipeline is full
   while (inFlightRequests_.size() < MAX_PIPELINE_SIZE) {
     
-    // If we're not working on a piece (offset is 0),
-    // must find a new piece
+    // 1. Get piece assignment from piecePicker
+    // if peer doesn't have active assignment
     if (nextBlockOffset_ == 0) {
-      if (!assignNewPiece(session)) {
-        setAmInterested(false); // Session gave no piece no longer interesting
+      if (!assignNewPiece()) {
+        // No pieces assigned
+        setAmInterested(false); 
         return;
       }
     }
 
-    // We have requested all blocks for this piece
+    // 2. Check if peer has requested every block for current piece
     if (nextBlockOffset_ >= currentPieceBuffer_.size()) {
       return;
     }
 
+    // Ensure buffer is valid
     long long thisPieceLength = currentPieceBuffer_.size();
     if (thisPieceLength == 0) {
-        // This can happen if we found a piece but failed to resize buffer
-        // Reset and attempt to request the first block
-        nextBlockOffset_ = 0;
-        return;
+      nextBlockOffset_ = 0;
+      return;
     }
 
-    // If we're here, nextPieceIndex_ is set to a piece that
-    // the peer has and we don't.
-    
+    // 3. Request next block of piece
     requestNextBlock(thisPieceLength);
-  
   }
 }
 
@@ -399,9 +385,8 @@ void Peer::handleUnchoke() {
 /**
  * @brief Handles a have message from a peer
  * 
- * Updates bitfield of peer
- * 
- * A have message means this peer has this signified piece
+ * Updates bitfield of peer through set have piece.
+ * Notifies piecePicker.
  */
 void Peer::handleHave(const PeerMessage& msg) {
   if (msg.payload.size() != 4) {
@@ -418,18 +403,15 @@ void Peer::handleHave(const PeerMessage& msg) {
   // Update local bitfield state
   setHavePiece(pieceIndex);
 
-  // Report to session
-  if (auto session = session_.lock()) {
-    session->onHaveReceived(shared_from_this(), pieceIndex);
-  }
+  // Report to piecePicker
+  picker_->processHave(pieceIndex);
 }
 
 /**
  * @brief Handles a have bitfield from a peer
  * 
- * Updates bitfield of peer
- * 
- * A have message means this peer has this signified piece
+ * Updates bitfield_ of peer.
+ * Reports bitfield to piecePicker.
  */
 void Peer::handleBitfield(const PeerMessage& msg) {
   spdlog::info("[{}] Received BITFIELD ({} bytes)", ip_, msg.payload.size());
@@ -437,10 +419,8 @@ void Peer::handleBitfield(const PeerMessage& msg) {
   // Update local bitfield state
   bitfield_ = msg.payload;
 
-  // Report to session
-  if (auto session = session_.lock()) {
-    session->onBitfieldReceived(shared_from_this(), msg.payload);
-  }
+  // Report to piecePicker
+  picker_->processBitfield(bitfield_);
 }
 
 
@@ -498,45 +478,52 @@ bool Peer::saveBlockToBuffer(uint32_t pieceIndex, uint32_t begin, const std::vec
   }
 }
 
+/**
+ * @brief Finishes piece downloading when 
+ * all blocks for a piece have been stored in buffer.
+ * 
+ * 1. Checks hash
+ * 2. Saves to disk
+ * 3. Notifies piecePicker
+ * 4. Resets for next piece
+ * 
+ * On hash/write fail
+ * Calls piecePicker onPieceFailed
+ * and resets buffer and blockoffset
+ */
 void Peer::completePiece(uint32_t pieceIndex) {
-  spdlog::info("[{}] COMPLETED PIECE {} (all blocks received)!", ip_, pieceIndex);
+  spdlog::info("[{}] Finished downloading piece {}", ip_, pieceIndex);
 
-  auto session = session_.lock();
-  if (!session) return; 
-
-  // Verify hash
-  if (verifyPieceHash(pieceIndex, session)) {
-    spdlog::info("[{}] HASH OK for piece {}", ip_, pieceIndex);
+  // 1. Verify Hash
+  if (repo_->verifyHash(pieceIndex, currentPieceBuffer_)) {
+    spdlog::info("[{}] Hash OK. Saving.", ip_);
     
-    // Set client bitfield
-    session->updateMyBitfield(pieceIndex);
-    
-    // Call write callback
-    session->onPieceCompleted(pieceIndex, currentPieceBuffer_);
-    
-    // Advance to next piece (Reset state)
-    nextBlockOffset_ = 0;
-    nextPieceIndex_++;
-    currentPieceBuffer_.clear();
+    // 2. Save to Disk
+    try {
+      repo_->savePiece(pieceIndex, currentPieceBuffer_);
+      
+      // 3. Notify Picker
+      picker_->onPiecePassed(pieceIndex);
+      
+      // Reset for next
+      nextBlockOffset_ = 0;
+      currentPieceBuffer_.clear();
+        
+    } catch (...) {
+      spdlog::error("Disk write failed");
+      picker_->onPieceFailed(pieceIndex);
 
-
+      nextBlockOffset_ = 0;
+      currentPieceBuffer_.clear();
+    }
   } else {
-    failedHashCount_++;
-    spdlog::error("[{}] *** HASH FAILED *** for piece {} (Strike {}/{})", ip_, pieceIndex, failedHashCount_, (int)MAX_BAD_HASHES);
-
-  if (failedHashCount_ >= MAX_BAD_HASHES) {
-    // Close the connection with a protocol error.
-    // This will trigger onMessageReceived with the error, which cleans up the session state.
-    conn_->close(boost::system::errc::make_error_code(boost::system::errc::protocol_error));
-    spdlog::error("[{}] Too many hash failures. Disconnecting peer.", ip_);
-    return; 
-  }
-  // Discard data and reset to re-download this piece
-  nextBlockOffset_ = 0;
-  currentPieceBuffer_.clear();
-
-  // Unassign piece so others can grab it (or we grab it again later)
-  session->unassignPiece(pieceIndex);
+    spdlog::error("[{}] Hash FAILED for piece {}", ip_, pieceIndex);
+    
+    // 3. Notify Picker (Strategy) - Put it back in queue
+    picker_->onPieceFailed(pieceIndex);
+    
+    nextBlockOffset_ = 0;
+    currentPieceBuffer_.clear();
   }
 }
 
@@ -595,42 +582,4 @@ void Peer::handlePiece(const PeerMessage& msg) {
     completePiece(pieceIndex);
   }
 
-}
-
-
-// --- Helper Functions ---
-
-/**
- * @brief Checks if the client has a specific piece.
- */
-bool Peer::clientHasPiece(size_t pieceIndex) const {
-  if (auto session = session_.lock()) {
-    return session->clientHasPiece(pieceIndex);
-  }
-  return false;
-}
-
-/**
- * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
- */
-bool Peer::verifyPieceHash(size_t pieceIndex, std::shared_ptr<ITorrentSession> session) {
-  if (!session) {
-    spdlog::error("[{}] ERROR: Cannot verify hash, no session.", ip_);
-    return false;
-  }
-  if (currentPieceBuffer_.empty()) {
-    spdlog::error("[{}] ERROR: Cannot verify hash, piece buffer is empty.", ip_);
-    return false;
-  }
-  
-  unsigned char calculatedHash[SHA_DIGEST_LENGTH]; // 20 bytes
-  SHA1(currentPieceBuffer_.data(), currentPieceBuffer_.size(), calculatedHash);
-  
-  // --- Get hash from session ---
-  const char* expectedHash = session->getPieceHash(pieceIndex);
-  if (!expectedHash) {
-    return false; // Invalid index
-  }
-  
-  return memcmp(calculatedHash, expectedHash, SHA_DIGEST_LENGTH) == 0;
 }

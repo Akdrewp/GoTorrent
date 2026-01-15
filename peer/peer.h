@@ -2,10 +2,12 @@
 #define PEER_H
 
 #include "peerConnection.h"
+#include "IPieceRepository.h"
+#include "IPiecePicker.h"
 #include <string>
 #include <vector>
-#include <optional>
 #include <memory>
+#include <optional>
 
 
 // Use a convenience namespace
@@ -37,11 +39,12 @@ public:
    * @param ip The IP address (for logging)
    * @param pieceManager The shared piece manager resource
    */
-  Peer(
-    std::shared_ptr<PeerConnection> conn, 
-    std::string ip, 
-    std::shared_ptr<IPieceManager> pieceManager
-  );
+    Peer(
+      std::shared_ptr<PeerConnection> conn, 
+      std::string ip, 
+      std::shared_ptr<IPieceRepository> repo,
+      std::shared_ptr<IPiecePicker> picker
+    );
 
   /**
    * @brief Starts the connection process for an OUTBOUND connection.
@@ -190,10 +193,9 @@ private:
    * 
    * Assigns this peer a piece
    * 
-   * @param session The session object
    * @returns true if assignment was successful, false otherwise
    */
-  bool assignNewPiece(std::shared_ptr<ITorrentSession> session);
+  bool assignNewPiece();
 
   /**
    * @brief Helper for requestPiece
@@ -217,20 +219,6 @@ private:
    * Verifies hash, writes to disk (via session), and resets state for the next piece.
    */
   void completePiece(uint32_t pieceIndex);
-  
-  /**
-   * @brief Checks whether the client has the piece of pieceIndex in their bitfield
-   * 
-   * @param pieceIndex index of piece to check
-   */
-  bool clientHasPiece(size_t pieceIndex) const;
-
-  /**
-   * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
-   * 
-   * @param pieceIndex index of piece to check the hash of
-   */
-  bool verifyPieceHash(size_t pieceIndex, std::shared_ptr<ITorrentSession> session);
 
   /**
    * @brief Sends a generic message to the peer.
@@ -264,7 +252,8 @@ private:
   std::string ip_; // For console logging
 
   // --- Dependencies ---
-  std::shared_ptr<IPieceManager> pieceManager_;
+  std::shared_ptr<IPieceRepository> repo_;
+  std::shared_ptr<IPiecePicker> picker_;
   std::weak_ptr<ITorrentSession> session_;
 
   /** @brief Bitfield of the peer */

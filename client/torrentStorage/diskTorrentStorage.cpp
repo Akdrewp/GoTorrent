@@ -197,37 +197,6 @@ std::fstream* DiskTorrentStorage::getFileStream(const std::filesystem::path& pat
   return filePool_.front().second.get();
 }
 
-// initializeSingleFile
-
-/**
- * @brief Helper for initializeSingleFile()
- * * Creates the output file if it doesn't exist and opens it
- * * @param outputFile The file stream
- * @param fullPath Path to file
- */
-static void createAndOpenOutputFile(std::fstream& outputFile, const fs::path& fullPath) {
-  // Check if file exists. If so, throw error
-  // May be handled differently perhaps by asking if user wants to overwrite
-  if (fs::exists(fullPath)) {
-    throw DiskStorageError("File already exists: " + fullPath.string());
-  }
-
-  spdlog::info("Storage: Creating new file...");
-
-  // Create empty file and close
-  outputFile.open(fullPath, std::ios::binary | std::ios::out);
-  outputFile.close();
-
-  // Open in Read/Write mode for random access
-  outputFile.open(fullPath, std::ios::binary | std::ios::in | std::ios::out);
-
-  if (!outputFile.is_open()) {
-    throw DiskStorageError("Failed to open output file: " + fullPath.string());
-  }
-}
-
-//
-
 /**
  * @brief Static helper to process a range of bytes spanning potentially multiple files.
  * @tparam Func Lambda type: void(std::fstream* stream, const fs::path& path, size_t localOffset, size_t chunk)

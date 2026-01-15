@@ -13,108 +13,74 @@
 TorrentSession::TorrentSession(
   asio::io_context& io_context, 
   TorrentData torrent,
-  std::string& peerId,
+  std::string peerId,
   unsigned short port,
   std::shared_ptr<ITrackerClient> trackerClient,
-  std::shared_ptr<ITorrentStorage> storage
+  std::shared_ptr<IPieceRepository> repo,
+  std::shared_ptr<IPiecePicker> picker
 ) : io_context_(io_context),
-    peerId_(peerId),
-    port_(port),
     torrent_(std::move(torrent)),
+    peerId_(std::move(peerId)),
+    port_(port),
     trackerClient_(std::move(trackerClient)),
-    storage_(std::move(storage))
+    repo_(std::move(repo)),
+    picker_(std::move(picker))
 {
+    if (!repo_ || !picker_) {
+        throw std::runtime_error("TorrentSession requires valid Repo and Picker");
+    }
 }
 
 /**
  * @brief Starts the session
- * * Loads torrent info, contacts and connects to peer
+ * Loads torrent info, contacts and connects to peer
  */
 void TorrentSession::start() {
   spdlog::info("--- Starting Torrent Session ---");
-  loadTorrentInfo();
+  
+  // Initialize the Repository (Load existing data, verify files)
+  // TODO CHANGE PATH
+  std::string DOWNLOAD_PATH = "./downloads"; 
+  repo_->initialize(DOWNLOAD_PATH); // Assumes repo needs path initialization
+
   requestPeers();
   connectToPeers();
 }
 
-// --- loadTorrentInfo ---
-
 /**
- * Helper function for loadTorrentInfo
- * * @brief Extracts the piece length from the info dictionary.
- * * @param infoDict The BencodeDict from .torrent file
+ * @brief Requests compact peer list from tracker
+ * 
+ * 1. Build tracker url from torrentData
+ * 2. Send request
+ * 3. Parse response
+ * 4. Load peer list into trackerPeers_
  */
-static long long getTorrentPieceLength(const BencodeDict& infoDict) {
-  if (infoDict.count("piece length")) {
-    return infoDict.at("piece length")->get<long long>();
-  }
-  throw std::runtime_error("Invalid 'piece length'.");
-}
-
-void TorrentSession::loadTorrentInfo() {
-  // Calculate our bitfield size
-  const auto& infoDict = torrent_.mainData.at("info")->get<BencodeDict>();
-
-  const std::string& piecesStr = infoDict.at("pieces")->get<std::string>();
-
-  // Store the pieces hashes
-  pieceHashes_ = piecesStr;
-
-  // Each piece has a hash in "pieces" each with length 20
-  // Amount of pieces is length of "pieces" / 20
-  numPieces_ =  pieceHashes_.length() / 20;
-
-  pieceLength_ = getTorrentPieceLength(infoDict);
-  totalLength_ = getTotalLengthTorrent(infoDict);
-
-  // TODO CHANGE
-  std::string DOWNLOAD_PATH = "./downloads"; // Current directory downloads folder
-  // Initialize file storage
-  storage_->initialize(torrent_, pieceLength_, DOWNLOAD_PATH);
-
-  // Each bit in the bitfield corresponds to a piece being recieved
-  //
-  // Need amount of pieces / 8 (bits in byte) rounded up to hold
-  // trailing bits
-  size_t bitfieldSize = (numPieces_ + 7) / 8; // ceil(numPieces / 8.0)
-
-  // Create our bitfield (all zeros, we have no pieces)
-  myBitfield_.resize(bitfieldSize, 0);
-
-  // Initialize rarity map
-  pieceAvailability_.resize(numPieces_, 0);
-
-  // Print the hash
-  spdlog::info("--- INFO HASH ---");
-  spdlog::info("{:n}", spdlog::to_hex(torrent_.infoHash));
-}
-
 void TorrentSession::requestPeers() {
-  // Get announce URL
-  std::string announceUrl = torrent_.mainData.at("announce")->get<std::string>();
 
-  // Build the Tracker GET URL
+  // 1. Build tracker url from torrentData
+  std::string announceUrl = torrent_.mainData.at("announce")->get<std::string>();
+  long long totalLength = repo_->getTotalLength();
   std::string trackerUrl = buildTrackerUrl(
     announceUrl,
     torrent_.infoHash,
     peerId_,
     port_,
     0,    // uploaded
-    0,    // downloaded
-    totalLength_,
+    0,    // downloaded (TODO: get from repo)
+    totalLength,
     1     // compact
   );
 
-  // Print request details
+  // 2. Print and send request 
   spdlog::info("--- PREPARING TRACKER REQUEST ---");
   spdlog::info("Announce URL: {}", announceUrl);
-  spdlog::info("Total Length (left): {}", totalLength_);
+  spdlog::info("Total Length (left): {}", totalLength);
 
   spdlog::info("--- SENDING REQUEST TO TRACKER ---");
   std::string trackerResponse = trackerClient_->sendRequest(trackerUrl);
   spdlog::info("Tracker raw response size: {} bytes", trackerResponse.size());
 
-  // Parse the tracker's response
+  // 3. Parse tracker response
   spdlog::info("--- PARSING TRACKER RESPONSE ---");
   size_t index = 0;
   std::vector<char> responseBytes(trackerResponse.begin(), trackerResponse.end());
@@ -123,7 +89,7 @@ void TorrentSession::requestPeers() {
   printBencodeValue(parsedResponse);
   std::cout << std::endl;
 
-  // Get peer list
+  // 4. Get and load peer list into trackerPeers_
   spdlog::info("--- PARSED PEER LIST ---");
   const auto& respDict = parsedResponse.get<BencodeDict>();
 
@@ -141,16 +107,35 @@ void TorrentSession::requestPeers() {
 
 // --- connectToPeers ---
 
-static std::shared_ptr<Peer> initPeer(asio::io_context& io_context, std::string peer_ip, uint16_t peer_port) {
-  // Create Connection (Transport Layer)
+/**
+ * @brief Creates a peer and injects dependencies
+ * 
+ * Helper for connectToPeers
+ * Creates the PeerConnection objects and injects
+ * Connection, pieceRepository, and piecePicker into Peer
+ */
+static std::shared_ptr<Peer> initPeer(
+    asio::io_context& io_context, 
+    std::string peer_ip, 
+    uint16_t peer_port,
+    std::shared_ptr<IPieceRepository> repo,
+    std::shared_ptr<IPiecePicker> picker
+) {
   auto conn = std::make_shared<PeerConnection>(io_context, peer_ip, peer_port);
   
-  // Inject Connection into Peer (Logic Layer)
-  auto peer = std::make_shared<Peer>(conn, peer_ip);
+  auto peer = std::make_shared<Peer>(conn, peer_ip, repo, picker);
 
   return peer;
 }
 
+/**
+ * @brief Attempts to connect to peers on trackerList
+ * 
+ * For every peer in trackerPeers_
+ *  1. Create peer
+ *  2. Starts peer connection
+ *  3. Add peer to peer list
+ */
 void TorrentSession::connectToPeers() {
   if (trackerPeers_.empty()) {
     spdlog::warn("No peers found from tracker.");
@@ -160,22 +145,22 @@ void TorrentSession::connectToPeers() {
   spdlog::info("--- CONNECTING TO PEERS ---");
   using namespace std::placeholders; // for _1, _2
 
-  // Try to connect to every peer
+  // Connect to every peer in tracker list
   for (const auto& peerInfo : trackerPeers_) {
 
-    // Create peer
-    auto peer = initPeer(io_context_, peerInfo.ip, peerInfo.port);
+    // 1. Create peer
+    auto peer = initPeer(io_context_, peerInfo.ip, peerInfo.port, repo_, picker_);
 
     spdlog::info("Attempting async connect to {}:{}", peerInfo.ip, peerInfo.port);
 
-    // This sends bitfield, waits for reply and completes handshake
+    // 2. Starts peer connection
     peer->startAsOutbound(
       torrent_.infoHash,
       peerId_,
       shared_from_this() // Pass self as session
     );
 
-    // Add peer to peer lists
+    // 3. Add peer to peer lists
     activePeers_.push_back(peer);
   }
   
@@ -188,8 +173,8 @@ void TorrentSession::handleInboundConnection(tcp::socket socket) {
   // Create Connection
   auto conn = std::make_shared<PeerConnection>(io_context_, std::move(socket));
   
-  // Create peer
-  auto peer = std::make_shared<Peer>(conn, conn->get_ip());
+  // Create peer with injected dependencies
+  auto peer = std::make_shared<Peer>(conn, conn->get_ip(), repo_, picker_);
 
   // Start the inbound connection process
   // This waits for the peer's handshake, then reply
@@ -200,209 +185,4 @@ void TorrentSession::handleInboundConnection(tcp::socket socket) {
   );
   // Add peer to peer lists
   activePeers_.push_back(peer);
-}
-
-void TorrentSession::onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data) {
-  unassignPiece(pieceIndex);
-
-  storage_->writePiece(pieceIndex, data);
-
-}
-
-/**
- * @brief When a peer sends their bitfield, update rarity map
- */
-void TorrentSession::onBitfieldReceived(std::shared_ptr<Peer> peer, std::vector<uint8_t> bitfield) {
-  // Update the global piece rarity map
-  for (size_t i = 0; i < numPieces_; ++i) {
-    size_t byte_index = i / 8;
-    uint8_t bit_index = 7 - (i % 8);
-    if (byte_index < bitfield.size() && (bitfield[byte_index] & (1 << bit_index))) {
-      pieceAvailability_[i]++;
-    }
-  }
-  
-  // Check if this peer is now interesting
-  checkIfPeerIsInteresting(peer);
-}
-
-void TorrentSession::checkIfPeerIsInteresting(std::shared_ptr<Peer> peer) {
-  // Check if we're already interested
-  if (peer->amInterested_) {
-    return;
-  }
-  
-  // Check if they have any piece we don't
-  for (size_t i = 0; i < numPieces_; ++i) {
-    if (peer->hasPiece(i)) {
-      if (!clientHasPiece(i)) {
-        // They have a piece we need
-        peer->setAmInterested(true);
-        return;
-      }
-    }
-  }
-}
-
-/**
- * @brief (SESSION) A peer reported it now has a new piece.
- */
-void TorrentSession::onHaveReceived(std::shared_ptr<Peer> peer, size_t pieceIndex) {
-  if (pieceIndex >= numPieces_) return; // Invalid index
-  
-  // Update global rarity
-  pieceAvailability_[pieceIndex]++;
-
-  // Check if this peer is now interesting
-  checkIfPeerIsInteresting(peer);
-}
-
-// --- assignWorkForPeer ---
-
-/**
- * @brief Gets the pieces the peer has sorted from least to most rare
- */
-static std::vector<size_t> getSortedCandidatePieces(
-  const std::shared_ptr<Peer>& peer,
-  size_t numPieces,
-  const std::vector<size_t>& pieceAvailability,
-  const std::set<size_t>& assignedPieces,
-  std::function<bool(size_t)> clientHasPieceFn
-) {
-  struct Candidate {
-    size_t index;
-    size_t rarity;
-  };
-
-  std::vector<Candidate> candidates;
-  // Reserve to avoid reallocations
-  candidates.reserve(numPieces);
-
-  // Get valid piece that:
-  // Peer has AND client doesn't AND not currently assigned
-  for (size_t i = 0; i < numPieces; ++i) {
-    if (peer->hasPiece(i)) {
-      if (!clientHasPieceFn(i)) {
-        if (assignedPieces.count(i) == 0) {
-          // Valid candidate
-          candidates.push_back({ i, pieceAvailability[i] });
-        }
-      }
-    }
-  }
-
-  // Sort candidates by Rarity (Ascending), then by Index
-  std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-    if (a.rarity != b.rarity) {
-      return a.rarity < b.rarity; // Prioritize rarer pieces
-    }
-    // Same rarity choose lower index
-    return a.index < b.index;
-  });
-
-  // Extract sorted indices
-  std::vector<size_t> sortedIndices;
-  sortedIndices.reserve(candidates.size());
-  for (const auto& c : candidates) {
-    sortedIndices.push_back(c.index);
-  }
-
-  return sortedIndices;
-}
-
-/**
- * @brief Gets top randomVariance pieces from pieces array and returns one at random
- * * @param pieces The pieces array sorted from most to least rare
- * @param randomVariance How many pieces to choose from the top
- * * @returns The index of randomly chosen piece
- */
-static size_t getTopRandomPiece(std::vector<size_t> pieces, int randomVariance) {
-  size_t poolSize = std::min(pieces.size(), static_cast<size_t>(randomVariance));
-  
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dis(0, poolSize - 1);
-
-  size_t chosenIndex = pieces[dis(gen)];
-
-  spdlog::info("--- SESSION: Assigning piece {}", chosenIndex);
-  
-  return chosenIndex;
-}
-
-/**
- * @brief Finds the best piece for the peer to start requesting
- * * Uses the Rarest first strategy:
- * Selects the piece that the least amount of peers have
- * * @param peer The peer to assign a piece to
- */
-std::optional<size_t> TorrentSession::assignWorkForPeer(std::shared_ptr<Peer> peer) {
-  // Rarest First with Randomness
-  // 1. Get peer pieces sorted by rarity
-  // 2. Choose from top N rarest pieces where N is variance
-
-  std::vector<size_t> sortedPieces = getSortedCandidatePieces(
-    peer, 
-    numPieces_, 
-    pieceAvailability_, 
-    assignedPieces_, 
-    [this](size_t i) { return clientHasPiece(i); }
-  );
-
-  // If no candidates, we have nothing for this peer to do
-  if (sortedPieces.empty()) {
-    return std::nullopt;
-  }
-
-  int chosenPieceIndex = getTopRandomPiece(sortedPieces, 1); // Random variance = 1 for now
-
-  spdlog::info("--- SESSION: Assigning piece {}", chosenPieceIndex);
-
-  // Lock the piece so no one else picks it
-  assignedPieces_.insert(chosenPieceIndex);
-  
-  return chosenPieceIndex;
-}
-
-/**
- * @brief Unlocks a piece when a peer is done
- */
-void TorrentSession::unassignPiece(size_t pieceIndex) {
-  if (assignedPieces_.count(pieceIndex)) {
-    spdlog::info("--- SESSION: Un-assigning piece {} ---", pieceIndex);
-    assignedPieces_.erase(pieceIndex);
-  }
-}
-
-/**
- * @brief Checks whether client has this piece
- */
-bool TorrentSession::clientHasPiece(size_t pieceIndex) const {
-  size_t byte_index = pieceIndex / 8;
-  uint8_t bit_index = 7 - (pieceIndex % 8);
-  if (byte_index >= myBitfield_.size()) {
-    return false;
-  }
-  return (myBitfield_[byte_index] & (1 << bit_index)) != 0;
-}
-
-/**
- * @brief Gets the piece hash for a piece
- */
-const char* TorrentSession::getPieceHash(size_t pieceIndex) const {
-  if (pieceIndex * 20 >= pieceHashes_.size()) {
-    return nullptr;
-  }
-  return pieceHashes_.data() + (pieceIndex * 20);
-}
-
-/**
- * @brief Updates clients bitfield
- */
-void TorrentSession::updateMyBitfield(size_t pieceIndex) {
-  size_t my_byte_index = pieceIndex / 8;
-  uint8_t my_bit_index = 7 - (pieceIndex % 8);
-  if (my_byte_index < myBitfield_.size()) {
-    myBitfield_[my_byte_index] |= (1 << my_bit_index);
-  }
 }

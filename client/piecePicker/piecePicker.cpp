@@ -99,7 +99,7 @@ std::optional<size_t> PiecePicker::pickPiece(
   }
 
   // Pick a random piece from the rarest candidates to distribute load
-  // For simplicity, we just pick the first one for now
+  // For now pick most rare
   size_t selected = candidates[0];
   
   inFlightPieces_.insert(selected);

@@ -2,16 +2,16 @@
 #define TORRENT_SESSION_H
 
 #include "ITorrentSession.h"
-#include "pieceManager.h" 
+#include "IPieceRepository.h" 
+#include "IPiecePicker.h"
 #include "httpTrackerClient.h"
 #include "torrent.h"
 #include "tracker.h"
-#include "peer.h"
+#include "peer.h" // Required for std::vector<std::shared_ptr<Peer>>
 #include <boost/asio.hpp>
 #include <string>
 #include <vector>
 #include <memory>
-#include <fstream>
 #include <set>
 
 namespace asio = boost::asio;
@@ -20,8 +20,8 @@ using asio::ip::tcp;
 /**
  * @brief Manages the entire lifecycle of a single torrent download.
  *
- * This class orchestrates tracker communication, file management,
- * and peer coordination.
+ * Loads a torrent file, contacts, trackers and gets peer list
+ * Creates peers and injects them with piecePicker and pieceRepository
  */
 class TorrentSession : public ITorrentSession, public std::enable_shared_from_this<TorrentSession> {
 public:
@@ -31,60 +31,33 @@ public:
    * @param torrent The parsed torrent data.
    * @param peerId The client's global 20-byte peer ID.
    * @param port The port the client is listening on.
-   * @param trackerClient the tracker send request to use
+   * @param trackerClient The tracker client to use.
+   * @param repo The shared storage and data repository.
+   * @param picker The shared piece selection strategy.
    */
   TorrentSession(
     asio::io_context& io_context, 
     TorrentData torrent,
-    std::string& peerId,
+    std::string peerId,
     unsigned short port,
     std::shared_ptr<ITrackerClient> trackerClient,
-    std::shared_ptr<PieceManager> pieceManager
+    std::shared_ptr<IPieceRepository> repo,
+    std::shared_ptr<IPiecePicker> picker
   );
 
   /**
    * @brief Starts the session
-   * 
-   * Loads torrent info, contacts and connects to peer
+   * Loads torrent info, contacts tracker, and connects to peers.
    */
   void start();
 
   /**
-   * @brief Handles a new inbound connection from the Client.
+   * @brief Handles a new inbound connection from a remote Client.
    * @param socket The newly accepted socket.
    */
   void handleInboundConnection(tcp::socket socket);
 
-  // --- ITorrenSession Implementation
-
-  // --- PUBLIC CALLBACKS (called by Peer) ---
-
-  /**
-   * @brief Called after recieving a piece
-   * @returns true if PieceManagaer succesfully verified and saved the data
-   */
-  bool onPieceCompleted(size_t pieceIndex, std::vector<uint8_t> data);
-  void onBitfieldReceived(std::shared_ptr<Peer> peer, std::vector<uint8_t> bitfield);
-  void onHaveReceived(std::shared_ptr<Peer> peer, size_t pieceIndex);
-  std::optional<size_t> assignWorkForPeer(std::shared_ptr<Peer> peer);
-  void unassignPiece(size_t pieceIndex);
-  
-  // --- PUBLIC GETTERS (called by Peer) ---
-
-  long long getPieceLength() const { return pieceLength_; }
-  long long getTotalLength() const { return totalLength_; }
-  const std::vector<uint8_t>& getBitfield() const { return myBitfield_; }
-  
-  bool clientHasPiece(size_t pieceIndex) const;
-  const char* getPieceHash(size_t pieceIndex) const;
-  void updateMyBitfield(size_t pieceIndex);
-
 private:
-  /**
-   * @brief Loads torrent info and opens the output file.
-   */
-  void loadTorrentInfo();
-
   /**
    * @brief Contacts the tracker to get a list of peers.
    */
@@ -95,19 +68,9 @@ private:
    */
   void connectToPeers();
 
-  /**
-   * @brief Checks if peer has pieces we want and tells peer.
-   */
-  void checkIfPeerIsInteresting(std::shared_ptr<Peer> peer);
-
-  // --- Helper Functions ---
-
-  // --- Helper Functions END ---
-
-
   // --- Client Server Components ---
   asio::io_context& io_context_;
-  std::string& peerId_; // Client's peerId
+  std::string peerId_; // Client's peerId
   unsigned short port_; // Port we are listening on
   
   // --- Torrent Info ---
@@ -115,17 +78,14 @@ private:
 
   // --- Dependencies ---
   std::shared_ptr<ITrackerClient> trackerClient_;
+  
+  // These shared resources are injected into every Peer created by this session
+  std::shared_ptr<IPieceRepository> repo_;
+  std::shared_ptr<IPiecePicker> picker_;
 
-  std::shared_ptr<PieceManager> pieceManager_;
-
-  // --- Peer & Piece Management ---
-  std::set<size_t> assignedPieces_;
+  // --- Peer Management ---
   std::vector<PeerInfo> trackerPeers_;
   std::vector<std::shared_ptr<Peer>> activePeers_;
-
-  // Stores the count of how many peers have each piece
-  // Used for requesting rarests pieces first
-  std::vector<size_t> pieceAvailability_;
 };
 
 #endif // TORRENT_SESSION_H

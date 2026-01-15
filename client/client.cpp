@@ -3,7 +3,8 @@
 #include "bencode.h"  // For BencodeValue, parseBencodedValue
 #include "httpTrackerClient.h" // For Tracker
 #include "diskTorrentStorage.h" // For storage
-#include "pieceManager.h" // For PieceManager
+#include "pieceRepository.h" // For PieceRepository
+#include "piecePicker.h" // For PiecePicker
 
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
@@ -95,18 +96,29 @@ void Client::run() {
   // Storage
   auto storage = std::make_shared<DiskTorrentStorage>();
 
-  // Piece Manager (Handles data integrity and storage)
-  // We construct it here to inject into Session
-  auto pieceManager = std::make_shared<PieceManager>(storage, torrent);
+  // Piece Repository (Handles data integrity and storage)
+  // Wraps storage and handles hashing/bitfields
+  auto repo = std::make_shared<PieceRepository>(storage, torrent);
+
+  // Piece Picker (Handles strategy and piece assignment)
+  // Calculate total pieces to initialize picker
+  const auto& infoDict = torrent.mainData.at("info")->get<BencodeDict>();
+  const std::string& piecesStr = infoDict.at("pieces")->get<std::string>();
+  size_t numPieces = piecesStr.length() / 20;
+  
+  auto picker = std::make_shared<PiecePicker>(numPieces);
+
+  TorrentData sessionTorrent = parseTorrentFile(torrentFilePath_);
 
   // Create the TorrentSession to manage this download
   session_ = std::make_shared<TorrentSession>(
     io_context_, 
-    torrent, // Pass copy/move of torrent data
+    std::move(sessionTorrent), // Pass copy/move of torrent data
     peerId_, 
     port_,
     trackerClient,
-    pieceManager // Inject the manager
+    repo,   // Inject Repository
+    picker  // Inject Picker
   );
 
   try {
