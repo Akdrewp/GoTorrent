@@ -245,7 +245,7 @@ private:
   std::vector<uint8_t> currentPieceBuffer_;
 
   int failedHashCount_ = 0;
-  static const int MAX_BAD_HASHES = 3;
+  static constexpr int MAX_BAD_HASHES = 3;
 
   // --- Connection ---
   std::shared_ptr<PeerConnection> conn_; // Socket connection layer

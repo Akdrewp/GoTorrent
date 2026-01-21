@@ -479,6 +479,40 @@ bool Peer::saveBlockToBuffer(uint32_t pieceIndex, uint32_t begin, const std::vec
 }
 
 /**
+ * @brief Static helper to handle piece hash failures
+ * Resets state and notifies the picker to re-queue the piece.
+ * 
+ * Increments failedHashCount_ and checks ifs more than the
+ * maximum bad hashes allowed. Disconnects if it has been
+ * reached.
+ */
+static void handleHashFail(
+  const std::shared_ptr<IPiecePicker>& picker,
+  const std::shared_ptr<PeerConnection>& conn,
+  const std::string& ip,
+  uint32_t pieceIndex,
+  uint32_t& nextBlockOffset, 
+  std::vector<uint8_t>& currentPieceBuffer,
+  int& failedHashCount,
+  const int& MAX_BAD_HASHES
+) {
+  picker->onPieceFailed(pieceIndex);
+  
+  // Reset state
+  nextBlockOffset = 0;
+  currentPieceBuffer.clear();
+
+  failedHashCount++;
+  spdlog::error("[{}] Hash/Write FAILED for piece {} (Strike {}/{})", ip, pieceIndex, failedHashCount, MAX_BAD_HASHES);
+
+  // Disconnect if limit reached
+  if (failedHashCount >= MAX_BAD_HASHES) {
+    spdlog::error("[{}] Too many bad hashes. Disconnecting.", ip);
+    conn->close(boost::system::errc::make_error_code(boost::system::errc::protocol_error));
+  }
+}
+
+/**
  * @brief Finishes piece downloading when 
  * all blocks for a piece have been stored in buffer.
  * 
@@ -489,23 +523,20 @@ bool Peer::saveBlockToBuffer(uint32_t pieceIndex, uint32_t begin, const std::vec
  * 
  * On hash/write fail
  * Calls piecePicker onPieceFailed
- * and resets buffer and blockoffset
+ * and handleHashFail
  */
 void Peer::completePiece(uint32_t pieceIndex) {
   spdlog::info("[{}] Finished downloading piece {}", ip_, pieceIndex);
 
-  // 1. Verify Hash
   if (repo_->verifyHash(pieceIndex, currentPieceBuffer_)) {
     spdlog::info("[{}] Hash OK. Saving.", ip_);
     
-    // 2. Save to Disk
     try {
       repo_->savePiece(pieceIndex, currentPieceBuffer_);
       
-      // 3. Notify Picker
       picker_->onPiecePassed(pieceIndex);
       
-      // Reset for next
+      // Reset for next piece
       nextBlockOffset_ = 0;
       currentPieceBuffer_.clear();
         
@@ -519,11 +550,7 @@ void Peer::completePiece(uint32_t pieceIndex) {
   } else {
     spdlog::error("[{}] Hash FAILED for piece {}", ip_, pieceIndex);
     
-    // 3. Notify Picker (Strategy) - Put it back in queue
-    picker_->onPieceFailed(pieceIndex);
-    
-    nextBlockOffset_ = 0;
-    currentPieceBuffer_.clear();
+    handleHashFail(picker_, conn_, ip_, pieceIndex, nextBlockOffset_, currentPieceBuffer_, failedHashCount_, MAX_BAD_HASHES);
   }
 }
 

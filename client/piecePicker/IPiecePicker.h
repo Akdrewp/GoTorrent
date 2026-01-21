@@ -15,7 +15,7 @@ public:
   /**
    * @brief Assigns a piece to a peer
    * @param peerBitfield The pieces the remote peer has
-   * @param myBitfield The pieces we already have (or have verified).
+   * @param myBitfield The pieces client already have (or have verified).
    * @return std::optional<size_t> Index of the piece to download, or nullopt.
    */
   virtual std::optional<size_t> pickPiece(
