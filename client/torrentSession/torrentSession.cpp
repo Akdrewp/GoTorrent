@@ -17,18 +17,21 @@ TorrentSession::TorrentSession(
   unsigned short port,
   std::shared_ptr<ITrackerClient> trackerClient,
   std::shared_ptr<IPieceRepository> repo,
-  std::shared_ptr<IPiecePicker> picker
+  std::shared_ptr<IPiecePicker> picker,
+  std::shared_ptr<IChokingAlgorithm> choker
 ) : io_context_(io_context),
     torrent_(std::move(torrent)),
     peerId_(std::move(peerId)),
     port_(port),
     trackerClient_(std::move(trackerClient)),
     repo_(std::move(repo)),
-    picker_(std::move(picker))
+    picker_(std::move(picker)),
+    choker_(std::move(choker)),
+    chokingTimer_(io_context)
 {
-    if (!repo_ || !picker_) {
-        throw std::runtime_error("TorrentSession requires valid Repo and Picker");
-    }
+  if (!repo_ || !picker_) {
+    throw std::runtime_error("TorrentSession requires valid Repo and Picker");
+  }
 }
 
 /**
@@ -43,8 +46,31 @@ void TorrentSession::start() {
   std::string DOWNLOAD_PATH = "./downloads"; 
   repo_->initialize(DOWNLOAD_PATH); // Assumes repo needs path initialization
 
+  startChokingTimer();
+
   requestPeers();
   connectToPeers();
+}
+
+/**
+ * @brief Starts choking algorithm every 10 seconds
+ * 
+ * Sets an asyncronous timer for 10 seconds then calls
+ * choking algorithm every 10 seconds
+ * 
+ * No infinite stack recursion since asyncronous
+ */
+void TorrentSession::startChokingTimer() {
+  // Set timer for 10 seconds
+  chokingTimer_.expires_after(std::chrono::seconds(10));
+
+  chokingTimer_.async_wait([self = shared_from_this()](const std::error_code& ec) {
+    if (ec) return; // Timer cancelled
+
+    self->choker_->rechoke(self->activePeers_);
+
+    self->startChokingTimer();
+  });
 }
 
 /**
@@ -178,7 +204,7 @@ void TorrentSession::handleInboundConnection(tcp::socket socket) {
 
   // Start the inbound connection process
   // This waits for the peer's handshake, then reply
-  peer->startAsOutbound(
+  peer->startAsInbound(
     torrent_.infoHash,
     peerId_,
     shared_from_this() // Pass self as session

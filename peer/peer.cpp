@@ -170,12 +170,40 @@ void Peer::sendRequest(uint32_t pieceIndex, uint32_t begin, uint32_t length) {
 
 /**
  * @brief Makes decisions based on the current peer state.
+ * 
+ * 1. Check if peer has pieces client doesn't 
+ * by comparing bitfields then setAmInterested to true
+ * 
+ * 2. Call requestPiece if peer is interesting and not choking
  */
 void Peer::doAction() {
-  // Check if we can and should request pieces (pipelining).
+  // 1. Check if peer is interesting
+  if(!amInterested_) {
+    std::vector<uint8_t> myBitfield = repo_->getBitfield();
+
+    bool interesting = false;
+    // Compare bitfields byte by byte
+    size_t limit = std::min(bitfield_.size(), myBitfield.size());
+    for (size_t i = 0; i < limit; ++i) {
+      if ((bitfield_[i] & ~myBitfield[i]) != 0) {
+        interesting = true;
+        break;
+      }
+    }
+    
+    // Check trailing bits if peer has more pieces than us
+    if (!interesting && bitfield_.size() > limit) {
+      for (size_t i = limit; i < bitfield_.size(); ++i) {
+        if (bitfield_[i] != 0) { interesting = true; break; }
+      }
+    }
+
+    if (interesting) {
+        setAmInterested(true);
+    }
+  }
+
   if (amInterested_ && !peerChoking_) {
-    // We are interested, and the peer is not choking us.
-    // Fill the request pipeline.
     requestPiece();
   }
 }
@@ -264,7 +292,7 @@ void Peer::requestNextBlock(long long pieceLength) {
 /**
  * @brief Fills the request pipeline for the current piece
  * 
- * loop until MAX_PIPELINE_SIZE has been reacher
+ * loop until MAX_PIPELINE_SIZE has been reached
  *   1. Gets piece from piecePicker if not currently assigned
  *   2. Check if all blocks have been requested for piece
  *   3. Send block request
@@ -335,6 +363,9 @@ void Peer::handleMessage(PeerMessage msg) {
     // bitfield: <len=0001+X><id=5><bitfield>
     case 5: handleBitfield(msg); break;
 
+    // request: <len=0013><id=6><index><begin><length>
+    case 6: handleRequest(msg); break;
+
     // piece: <len=0009+X><id=7><index><begin><block>
     case 7: handlePiece(msg); break;
     default:
@@ -351,7 +382,7 @@ void Peer::handleMessage(PeerMessage msg) {
  * 
  * A choke message means a peer will not accept any messages from us.
  * 
- * Any existing messages should be considered to be discarded
+ * Any existing requests should be considered to be discarded
  */
 void Peer::handleChoke() {
   spdlog::info("[{}] Received CHOKE", ip_);
@@ -421,6 +452,81 @@ void Peer::handleBitfield(const PeerMessage& msg) {
 
   // Report to piecePicker
   picker_->processBitfield(bitfield_);
+}
+
+// --- handleRequest ---
+
+/**
+ * @brief Static helper for handleRequest
+ * Reads data from disk and sends a PIECE message.
+ * 1. Reads block from repository
+ * 2. Constructs payload <index><begin><block>
+ * 3. Sends PIECE message with payload
+ */
+static void fulfillRequest(
+    const std::shared_ptr<IPieceRepository>& repo,
+    const std::shared_ptr<PeerConnection>& conn,
+    const std::string& ip,
+    uint32_t index,
+    uint32_t begin,
+    uint32_t length
+) {
+  try {
+    std::vector<uint8_t> block = repo->readBlock(index, begin, length);
+    
+    // 1. Construct PIECE message: <index><begin><block>
+    std::vector<uint8_t> payload(8 + block.size());
+    
+    uint32_t netIndex = htonl(index);
+    uint32_t netBegin = htonl(begin);
+    
+    // Copy headers and data into the payload buffer
+    memcpy(payload.data(), &netIndex, 4);
+    memcpy(payload.data() + 4, &netBegin, 4);
+    memcpy(payload.data() + 8, block.data(), block.size());
+    
+    conn->sendMessage(7, payload);
+    
+  } catch (const std::exception& e) {
+    spdlog::warn("[{}] Could not fulfill request for piece {} offset {}: {}", ip, index, begin, e.what());
+  }
+}
+
+/**
+ * @brief Handles a Request message from peer
+ * 
+ * Send the block to a peer who is not being choked
+ * 
+ * 1. Ensure peer is not being choked
+ * 2. Validate header and message payload
+ * 3. Send block
+ */
+void Peer::handleRequest(const PeerMessage& msg) {
+  if (amChoking_) {
+    // If we are choking the peer, we ignore requests.
+    return;
+  }
+
+  // 2. Validate message and convert to host byte order
+  if (msg.payload.size() != 12) {
+    spdlog::warn("[{}] Invalid REQUEST size: {}", ip_, msg.payload.size());
+    return;
+  }
+  uint32_t index, begin, length;
+  memcpy(&index, msg.payload.data(), 4);
+  memcpy(&begin, msg.payload.data() + 4, 4);
+  memcpy(&length, msg.payload.data() + 8, 4);
+  index = ntohl(index);
+  begin = ntohl(begin);
+  length = ntohl(length);
+
+  if (length > 131072) {
+    spdlog::warn("[{}] Request too large: {}", ip_, length);
+    return;
+  }
+
+  // 3. Send block to peer
+  fulfillRequest(repo_, conn_, ip_, index, begin, length);
 }
 
 
@@ -554,49 +660,53 @@ void Peer::completePiece(uint32_t pieceIndex) {
   }
 }
 
+/**
+ * @brief Processes an incoming PIECE message containing a block of data
+ * 
+ * 1. Validates message payload data and headers
+ * 2. Verifies block matches an existing inFlightRequest
+ * 3. Writes block data into the currentPieceBuffer_
+ * 4. Checks if the piece is finished and 
+ * calls completePiece() if it is
+ */
 void Peer::handlePiece(const PeerMessage& msg) {
+  // 1. Validate data and convert to host byte order
   if (msg.payload.size() < 8) {
     spdlog::error("[{}] Invalid PIECE message payload size: {}", ip_, msg.payload.size());
     return;
   }
-
-  // Copy data and convert to host byte order
   uint32_t pieceIndex, begin;
   memcpy(&pieceIndex, msg.payload.data(), 4);
   memcpy(&begin, msg.payload.data() + 4, 4);
   pieceIndex = ntohl(pieceIndex);
   begin = ntohl(begin);
   size_t blockLength = msg.payload.size() - 8;
-
   spdlog::info("[{}] Received PIECE: Index={}", ip_, pieceIndex);
   spdlog::info("[{}] Begin={}", ip_, begin);
   spdlog::info("[{}] Length={}", ip_, blockLength);
 
-  // Find this block from our in-flight list
+  // 2. Verify piece is from a request we sent to this peer
   auto it = std::find_if(inFlightRequests_.begin(), inFlightRequests_.end(), 
     [pieceIndex, begin, blockLength](const PendingRequest& req) {
         return req.pieceIndex == pieceIndex && 
                 req.begin == begin && 
                 req.length == blockLength;
     });
-
   if (it == inFlightRequests_.end()) {
     spdlog::error("[{}]   ERROR: Received a PIECE that doesn't match any request.", ip_);
     return;
   }
 
-  // Remove from buffer
+  // 3. Remove from requests and save to currenPieceBuffer_
   inFlightRequests_.erase(it);
-
   if (!saveBlockToBuffer(pieceIndex, begin, msg.payload)) {
     return; // Failed
   }
 
-  // Check if this piece is now complete
+  // 4. Check if this piece is now complete
   // (We are done if the pipeline for this piece is empty
   // AND our offset is at the end)
   bool pieceFinished = (nextBlockOffset_ >= currentPieceBuffer_.size());
-  
   // Check if any other in-flight requests are for this piece
   for (const auto& req : inFlightRequests_) {
     if (req.pieceIndex == nextPieceIndex_) {
@@ -604,9 +714,42 @@ void Peer::handlePiece(const PeerMessage& msg) {
       break;
     }
   }
-
   if (pieceFinished) {
     completePiece(pieceIndex);
   }
 
+}
+
+// --- Choking Algorithm ---
+
+double Peer::getDownloadRate() const {
+    // TODO: Implement actual rate calculation logic in PeerConnection or Peer
+    // For now, return 0 or random for testing
+    return 0.0;
+}
+
+double Peer::getUploadRate() const {
+    // TODO: Implement actual rate calculation logic
+    return 0.0;
+}
+
+bool Peer::isAmChoking() const {
+    return amChoking_;
+}
+
+void Peer::setAmChoking(bool choking) {
+    if (amChoking_ == choking) return;
+
+    amChoking_ = choking;
+    if (amChoking_) {
+      spdlog::info("[{}] Choking Peer.", ip_);
+      conn_->sendMessage(0, {}); // ID 0 = Choke
+    } else {
+      spdlog::info("[{}] Unchoking Peer.", ip_);
+      conn_->sendMessage(1, {}); // ID 1 = Unchoke
+    }
+}
+
+std::string Peer::getIp() const {
+    return ip_;
 }

@@ -108,6 +108,36 @@ public:
    */
   bool hasPiece(uint32_t pieceIndex) const;
 
+  // --- Choking Algorithm Support ---
+
+  /**
+   * @brief Gets the estimated download rate from this peer in bytes/sec.
+   * Used by the choking algorithm to determine best peers.
+   */
+  double getDownloadRate() const;
+
+  /**
+   * @brief Gets the estimated upload rate to this peer in bytes/sec.
+   * Used by the choking algorithm when seeding.
+   */
+  double getUploadRate() const;
+
+  /**
+   * @brief Checks if we are currently choking this peer.
+   */
+  bool isAmChoking() const;
+
+  /**
+   * @brief Sets our choking state for this peer.
+   * Sends CHOKE (0) or UNCHOKE (1) message if state changes.
+   */
+  void setAmChoking(bool choking);
+
+  /**
+   * @brief Gets the peer's IP address.
+   */
+  std::string getIp() const;
+
   // --- Peer State Variables ---
   // These variables store the state of this peer.
   
@@ -158,6 +188,10 @@ private:
    * @brief Handles a Bitfield message (ID 5) 
    */
   void handleBitfield( const PeerMessage& msg);
+  /** 
+   * @brief Handles a Request message (ID 6)
+   */
+  void handleRequest(const PeerMessage& msg);
   /** 
    * @brief Handles a Piece message (ID 7) 
    */

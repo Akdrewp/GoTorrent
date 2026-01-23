@@ -8,6 +8,7 @@
 #include "torrent.h"
 #include "tracker.h"
 #include "peer.h" // Required for std::vector<std::shared_ptr<Peer>>
+#include "IChokingAlgorithm.h"
 #include <boost/asio.hpp>
 #include <string>
 #include <vector>
@@ -34,6 +35,7 @@ public:
    * @param trackerClient The tracker client to use.
    * @param repo The shared storage and data repository.
    * @param picker The shared piece selection strategy.
+   * @param choker The shared peer choking algorithm.
    */
   TorrentSession(
     asio::io_context& io_context, 
@@ -42,7 +44,8 @@ public:
     unsigned short port,
     std::shared_ptr<ITrackerClient> trackerClient,
     std::shared_ptr<IPieceRepository> repo,
-    std::shared_ptr<IPiecePicker> picker
+    std::shared_ptr<IPiecePicker> picker,
+    std::shared_ptr<IChokingAlgorithm> choker
   );
 
   /**
@@ -58,6 +61,11 @@ public:
   void handleInboundConnection(tcp::socket socket);
 
 private:
+  /**
+   * @brief Starts and runs timer for choking algorithm.
+   */
+  void startChokingTimer();
+
   /**
    * @brief Contacts the tracker to get a list of peers.
    */
@@ -78,6 +86,8 @@ private:
 
   // --- Dependencies ---
   std::shared_ptr<ITrackerClient> trackerClient_;
+  std::shared_ptr<IChokingAlgorithm> choker_;
+  asio::steady_timer chokingTimer_;
   
   // These shared resources are injected into every Peer created by this session
   std::shared_ptr<IPieceRepository> repo_;

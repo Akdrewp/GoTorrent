@@ -4,6 +4,7 @@
 #include <cstring> // For memcpy
 #include <chrono> 
 #include <boost/asio/buffer.hpp> // For asio::buffer
+#include <boost/asio/steady_timer.hpp> 
 
 static constexpr uint32_t BLOCK_SIZE = 16384; // 2^14 16KB
 static constexpr int TIMEOUT_TIME = 5; // Should be 5 seconds
@@ -15,6 +16,8 @@ PeerConnection::PeerConnection(asio::io_context& io_context, std::string peer_ip
     socket_(io_context),
     resolver_(io_context),
     timer_(io_context),
+    keepAliveTimer_(io_context),
+    speedTimer_(io_context),
     readHeaderBuffer_(4),
     handshakeBuffer_(68)
 {
@@ -25,6 +28,8 @@ PeerConnection::PeerConnection(asio::io_context& io_context, tcp::socket socket)
   : socket_(std::move(socket)),
     resolver_(io_context),
     timer_(io_context),
+    keepAliveTimer_(io_context),
+    speedTimer_(io_context),
     readHeaderBuffer_(4),
     handshakeBuffer_(68)
 {
@@ -35,6 +40,85 @@ PeerConnection::PeerConnection(asio::io_context& io_context, tcp::socket socket)
     std::cerr << "Error getting remote endpoint: " << e.what() << std::endl;
     ip_ = "unknown";
     port_str_ = "0";
+  }
+}
+// --- Speed Tracking ---
+
+// --- SPEED TRACKING LOGIC ---
+
+void PeerConnection::startSpeedTimer() {
+  speedTimer_.expires_after(std::chrono::seconds(1));
+  auto self = shared_from_this();
+  speedTimer_.async_wait([this, self](const boost::system::error_code& ec) {
+      calculateSpeed(ec);
+  });
+}
+
+/**
+ * @brief Updates the upload and download rate speeds
+ * and starts speed timer.
+ */
+void PeerConnection::calculateSpeed(const boost::system::error_code& ec) {
+  if (ec == asio::error::operation_aborted) return;
+
+  // Update public rates (Bytes per second)
+  downloadRate_ = bytesDownloadedInterval_;
+  uploadRate_ = bytesUploadedInterval_;
+
+  // Reset interval counters
+  bytesDownloadedInterval_ = 0;
+  bytesUploadedInterval_ = 0;
+
+  // Restart timer
+  startSpeedTimer();
+}
+
+// --- Keep Alive ---
+
+/**
+ * @brief Starts a keep alive timer which calls checkKeepAlive
+ */
+void PeerConnection::startKeepAliveTimer() {
+  lastWriteTime_ = std::chrono::steady_clock::now();
+  
+  // 60 Seconds should be good. 
+  // Reccomended is every 120 seconds without message sent.
+  keepAliveTimer_.expires_after(std::chrono::seconds(60));
+  
+  auto self = shared_from_this();
+  keepAliveTimer_.async_wait([this, self](const boost::system::error_code& ec) {
+      checkKeepAlive(ec);
+  });
+}
+
+void PeerConnection::checkKeepAlive(const boost::system::error_code& ec) {
+  if (ec == asio::error::operation_aborted || !socket_.is_open()) return;
+
+  auto now = std::chrono::steady_clock::now();
+  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastWriteTime_).count();
+
+  // If we haven't written anything for > 100 seconds
+  // 120 seconds reccomended
+  if (elapsed >= 100) {
+    std::cout << "[" << ip_ << "] Idle for " << elapsed << "s. Sending Keep-Alive." << std::endl;
+    sendKeepAlivePacket();
+  }
+
+  // Schedule next check
+  keepAliveTimer_.expires_after(std::chrono::seconds(60));
+  auto self = shared_from_this();
+  keepAliveTimer_.async_wait([this, self](const boost::system::error_code& ec) {
+    checkKeepAlive(ec);
+  });
+}
+
+void PeerConnection::sendKeepAlivePacket() {
+  std::vector<uint8_t> packet(4, 0); 
+  
+  writeQueue_.push_back(std::move(packet));
+
+  if (writeQueue_.size() == 1) {
+    doWrite();
   }
 }
 
@@ -114,6 +198,9 @@ void PeerConnection::handleConnect(const boost::system::error_code& ec) {
     return;
   }
   std::cout << "[" << ip_ << "] Successfully connected." << std::endl;
+
+  startKeepAliveTimer();
+
   doWriteHandshake();
 }
 
@@ -439,6 +526,10 @@ void PeerConnection::handleWrite(const boost::system::error_code& ec, size_t byt
   }
 
   writeQueue_.pop_front();
+
+  lastWriteTime_ = std::chrono::steady_clock::now();
+
+  bytesUploadedInterval_ += bytesTransferred;
 
   // If there's more to write, keep the loop going
   if (!writeQueue_.empty()) {

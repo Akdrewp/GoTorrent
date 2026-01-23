@@ -2,63 +2,37 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build Client (make)",
+      "label": "CMake Build Client",
       "type": "shell",
-      // This now just runs "make"
-      "command": "make",
+      "command": "cmake",
       "args": [
-        // This now matches the "client" target in the new Makefile
-        "client"
+        "--build",
+        "${workspaceFolder}/build",  // Build inside the build folder
+        "--target",
+        "bittorrent_client",       // Target name from CMakeLists.txt
+        "-j", "4"                  // Use 4 cores (faster)
       ],
       "group": {
         "kind": "build",
         "isDefault": true
       },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "detail": "Builds the main bittorrent_client executable using the Makefile",
-      "options": {
-        "cwd": "${workspaceFolder}",
-      }
+      "problemMatcher": "$gcc",
+      "detail": "Compiles the main client using CMake"
     },
     {
-      "label": "Build Tests (make)",
+      "label": "CMake Build Tests",
       "type": "shell",
-      // This is the new task that your launch.json needs
-      "command": "make",
+      "command": "cmake",
       "args": [
-        // This matches the "tests" target in the new Makefile
-        "tests"
+        "--build",
+        "${workspaceFolder}/build",
+        "--target",
+        "unit_tests",              // Target name from CMakeLists.txt
+        "-j", "4"
       ],
       "group": "build",
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "detail": "Builds the run_tests executable",
-      "options": {
-        "cwd": "${workspaceFolder}",
-      }
-    },
-    {
-      "label": "Run Tests (make)",
-      "type": "shell",
-      // This runs "make run_tests"
-      "command": "make",
-      "args": [
-        // This matches the "run_tests" target
-        "run_tests"
-      ],
-      "group": {
-        "kind": "test",
-        "isDefault": true
-      },
-      "problemMatcher": [],
-      "detail": "Builds and runs the GTest executable",
-      "options": {
-        "cwd": "${fileDirname}",
-      }
+      "problemMatcher": "$gcc",
+      "detail": "Compiles the tests using CMake"
     }
   ]
 }
-

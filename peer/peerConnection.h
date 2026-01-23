@@ -9,6 +9,9 @@
 #include <memory>
 #include <functional> // For std::function
 #include <deque>    // For write queue
+#include <boost/asio.hpp>
+#include <boost/system/error_code.hpp>
+#include <chrono>
 
 // Use a convenience namespace
 namespace asio = boost::asio;
@@ -25,7 +28,9 @@ struct PeerMessage {
 /**
  * @brief Manages the raw TCP socket and byte-level communication.
  * 
- * Uses aynchronous reads and writes and communicates with peer through completion handlers
+ * Uses aynchronous reads and writes and communicates with peer through completion handlers.
+ * 
+ * Handles sending KEEP ALIVE messages every 2 minutes
  */
 class PeerConnection : public std::enable_shared_from_this<PeerConnection> {
 public:
@@ -96,6 +101,11 @@ public:
   virtual void sendMessage(uint8_t id, const std::vector<unsigned char>& payload);
 
   /**
+   * @brief Sends the KEEP ALIVE message necessary
+   */
+  void sendKeepAlivePacket();
+
+  /**
    * @brief Closes the connection by closing the socket and stopping the timer
    */
   virtual void close(const boost::system::error_code& ec = {});
@@ -104,6 +114,13 @@ public:
    * @brief Gets the IP address of the remote peer (for logging).
    */
   std::string get_ip() const { return ip_; }
+
+
+  /**
+   * @brief Getters for Download/Upload
+   */
+  uint64_t getDownloadRate() const { return downloadRate_; }
+  int64_t getUploadRate() const { return uploadRate_; }
 
 private:
   // --- Inbound Handshake ---
@@ -160,6 +177,41 @@ private:
   void doReadHandshake();
   void handleReadHandshake(const boost::system::error_code& ec, size_t bytesTransferred);
   void handleTimeout(const boost::system::error_code& ec);
+
+  // -- Speed Tracking ---
+
+  /**
+   * @brief Starts speedTimer_
+   */
+  void startSpeedTimer();
+
+  /**
+   * @brief Calculates upload and download speed of peer
+   */
+  void calculateSpeed(const boost::system::error_code& ec);
+
+  // --- Keep Alive ---
+
+  /**
+   * @brief Starts a timer for how long to wait until sending keep alive
+   */
+  void startKeepAliveTimer();
+  /**
+   * @brief Checks the last time we wrote a message and 
+   * sends a keep alive message if it's greater than
+   * the maximum time in between messages
+   */
+  void checkKeepAlive(const boost::system::error_code& ec);
+       
+  asio::steady_timer keepAliveTimer_; 
+  std::chrono::steady_clock::time_point lastWriteTime_;
+
+  // --- Download/Upload information
+  asio::steady_timer speedTimer_;
+  uint64_t downloadRate_ = 0;
+  uint64_t uploadRate_ = 0;
+  uint64_t bytesDownloadedInterval_ = 0;
+  uint64_t bytesUploadedInterval_ = 0;
 
   // --- Asio state for connections ---
   std::string ip_;

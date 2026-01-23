@@ -5,6 +5,7 @@
 #include "diskTorrentStorage.h" // For storage
 #include "pieceRepository.h" // For PieceRepository
 #include "piecePicker.h" // For PiecePicker
+#include "titForTatChoking.h"
 
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
@@ -106,7 +107,10 @@ void Client::run() {
   const std::string& piecesStr = infoDict.at("pieces")->get<std::string>();
   size_t numPieces = piecesStr.length() / 20;
   
+  // Picker
   auto picker = std::make_shared<PiecePicker>(numPieces);
+
+  auto choker = std::make_shared<TitForTatChoking>();
 
   TorrentData sessionTorrent = parseTorrentFile(torrentFilePath_);
 
@@ -118,7 +122,8 @@ void Client::run() {
     port_,
     trackerClient,
     repo,   // Inject Repository
-    picker  // Inject Picker
+    picker,
+    choker
   );
 
   try {

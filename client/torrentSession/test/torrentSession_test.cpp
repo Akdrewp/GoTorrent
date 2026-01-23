@@ -4,11 +4,17 @@
 #include "ITracker.h"
 #include "IPieceRepository.h"
 #include "IPiecePicker.h"
+#include "IChokingAlgorithm.h"
 #include "torrent.h"
 
 using namespace testing;
 
 // --- Mocks ---
+
+class MockChokingAlgorithm : public IChokingAlgorithm {
+public:
+  MOCK_METHOD(void, rechoke, (std::vector<std::shared_ptr<Peer>>&), (override));
+};
 
 class MockTrackerClient : public ITrackerClient {
 public:
@@ -45,6 +51,7 @@ protected:
   std::shared_ptr<MockTrackerClient> mockTracker;
   std::shared_ptr<MockPieceRepository> mockRepo;
   std::shared_ptr<MockPiecePicker> mockPicker;
+  std::shared_ptr<MockChokingAlgorithm> mockChokingAlgorithm;
   std::shared_ptr<TorrentSession> session;
 
   template <typename T>
@@ -76,7 +83,7 @@ protected:
     mockPicker = std::make_shared<MockPiecePicker>();
     
     TorrentData torrent = createDummyTorrent();
-    session = std::make_shared<TorrentSession>(io, std::move(torrent), peerId, port, mockTracker, mockRepo, mockPicker);
+    session = std::make_shared<TorrentSession>(io, std::move(torrent), peerId, port, mockTracker, mockRepo, mockPicker, mockChokingAlgorithm);
   }
 };
 

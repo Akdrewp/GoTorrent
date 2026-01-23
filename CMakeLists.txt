@@ -37,6 +37,7 @@ target_include_directories(bittorrent_client PRIVATE
     src bencode torrent tracker client peer
     client/torrentStorage client/torrentSession
     client/piecePicker client/pieceRepository
+    client/chokingAlgorithm
 )
 
 target_link_libraries(bittorrent_client PRIVATE
@@ -65,6 +66,7 @@ target_include_directories(unit_tests PRIVATE
     src bencode torrent tracker client peer
     client/torrentStorage client/torrentSession
     client/piecePicker client/pieceRepository
+    client/chokingAlgorithm
 )
 
 # Link Libraries + GTest
