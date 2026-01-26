@@ -2,14 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug Client",
+      "name": "Debug Client (CMake)",
       "type": "cppdbg",
       "request": "launch",
-      // Updated program name to match the Makefile
-      "program": "${workspaceFolder}/bittorrent_client",
+      // CHANGE 1: Point to the 'build' folder
+      "program": "${workspaceFolder}/build/bittorrent_client",
       "args": [
-        // Add a default torrent file to debug with
-        "${workspaceFolder}/ubuntu-25.10-desktop-amd64.iso.torrent"
+        "${workspaceFolder}/LibreOffice_25.8.4_Win_x86-64.msi.torrent"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
@@ -21,23 +20,17 @@
           "description": "Enable pretty-printing for gdb",
           "text": "-enable-pretty-printing",
           "ignoreFailures": true
-        },
-        {
-          "description": "Set Disassembly Flavor to Intel",
-          "text": "-gdb-set disassembly-flavor intel",
-          "ignoreFailures": true
         }
       ],
-      // This task now runs "make client" before debugging
-      "preLaunchTask": "Build Client (make)"
+      // CHANGE 2: Use the new Task Label
+      "preLaunchTask": "CMake Build Client"
     },
     {
-      "name": "Debug Tests",
+      "name": "Debug Tests (CMake)",
       "type": "cppdbg",
       "request": "launch",
-      // This is the FIX: The program to debug is the executable,
-      // not the "run" target.
-      "program": "${workspaceFolder}/test_runner_executable",
+      // CHANGE 1: Point to the 'build' folder & correct executable name
+      "program": "${workspaceFolder}/build/unit_tests",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
@@ -51,9 +44,8 @@
           "ignoreFailures": true
         }
       ],
-      // This task now runs "make tests" before debugging
-      "preLaunchTask": "Build Tests (make)"
+      // CHANGE 2: Use the new Task Label
+      "preLaunchTask": "CMake Build Tests"
     }
   ]
 }
-

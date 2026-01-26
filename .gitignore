@@ -10,6 +10,9 @@
 # Ignore download folder
 /downloads
 
+#Ignore build folder
+/build
+
 # Ignore compiled executables
 bittorrent_client
 test_runner_executable

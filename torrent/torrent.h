@@ -14,8 +14,8 @@
  * @brief Holds the key data parsed from a .torrent file.
  */
 struct TorrentData {
-    BencodeDict mainData;               // The full parsed dictionary
-    std::vector<unsigned char> infoHash; // The 20-byte SHA-1 info_hash
+  BencodeDict mainData;               // The full parsed dictionary
+  std::vector<unsigned char> infoHash; // The 20-byte SHA-1 info_hash
 };
 
 /**

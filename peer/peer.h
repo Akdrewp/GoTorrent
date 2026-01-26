@@ -2,18 +2,21 @@
 #define PEER_H
 
 #include "peerConnection.h"
+#include "IPieceRepository.h"
+#include "IPiecePicker.h"
 #include <string>
 #include <vector>
-#include <optional>
 #include <memory>
+#include <optional>
 
 
 // Use a convenience namespace
 namespace asio = boost::asio;
 using asio::ip::tcp;
 
-// Forward declaration for ITorrentSession defined in ITorrentSession.h
+// Forward declarations
 class ITorrentSession;
+class PieceManager;
 
 /**
  * @brief Holds info about a block request we are waiting for.
@@ -32,8 +35,16 @@ public:
 
   /**
    * @brief Constructor for peer
+   * @param conn The connection wrapper
+   * @param ip The IP address (for logging)
+   * @param pieceManager The shared piece manager resource
    */
-  Peer(std::shared_ptr<PeerConnection> conn, std::string ip);
+    Peer(
+      std::shared_ptr<PeerConnection> conn, 
+      std::string ip, 
+      std::shared_ptr<IPieceRepository> repo,
+      std::shared_ptr<IPiecePicker> picker
+    );
 
   /**
    * @brief Starts the connection process for an OUTBOUND connection.
@@ -97,6 +108,36 @@ public:
    */
   bool hasPiece(uint32_t pieceIndex) const;
 
+  // --- Choking Algorithm Support ---
+
+  /**
+   * @brief Gets the estimated download rate from this peer in bytes/sec.
+   * Used by the choking algorithm to determine best peers.
+   */
+  double getDownloadRate() const;
+
+  /**
+   * @brief Gets the estimated upload rate to this peer in bytes/sec.
+   * Used by the choking algorithm when seeding.
+   */
+  double getUploadRate() const;
+
+  /**
+   * @brief Checks if we are currently choking this peer.
+   */
+  bool isAmChoking() const;
+
+  /**
+   * @brief Sets our choking state for this peer.
+   * Sends CHOKE (0) or UNCHOKE (1) message if state changes.
+   */
+  void setAmChoking(bool choking);
+
+  /**
+   * @brief Gets the peer's IP address.
+   */
+  std::string getIp() const;
+
   // --- Peer State Variables ---
   // These variables store the state of this peer.
   
@@ -148,6 +189,10 @@ private:
    */
   void handleBitfield( const PeerMessage& msg);
   /** 
+   * @brief Handles a Request message (ID 6)
+   */
+  void handleRequest(const PeerMessage& msg);
+  /** 
    * @brief Handles a Piece message (ID 7) 
    */
   void handlePiece(const PeerMessage& msg);
@@ -182,10 +227,9 @@ private:
    * 
    * Assigns this peer a piece
    * 
-   * @param session The session object
    * @returns true if assignment was successful, false otherwise
    */
-  bool assignNewPiece(std::shared_ptr<ITorrentSession> session);
+  bool assignNewPiece();
 
   /**
    * @brief Helper for requestPiece
@@ -209,20 +253,6 @@ private:
    * Verifies hash, writes to disk (via session), and resets state for the next piece.
    */
   void completePiece(uint32_t pieceIndex);
-  
-  /**
-   * @brief Checks whether the client has the piece of pieceIndex in their bitfield
-   * 
-   * @param pieceIndex index of piece to check
-   */
-  bool clientHasPiece(size_t pieceIndex) const;
-
-  /**
-   * @brief Verifies the SHA-1 hash of the piece in currentPieceBuffer_.
-   * 
-   * @param pieceIndex index of piece to check the hash of
-   */
-  bool verifyPieceHash(size_t pieceIndex, std::shared_ptr<ITorrentSession> session);
 
   /**
    * @brief Sends a generic message to the peer.
@@ -237,15 +267,7 @@ private:
    * @param pieceIndex index of piece to set in bitfield
    */
   void setHavePiece(uint32_t pieceIndex);
-
-  /**
-   * @brief Logging functions for the peer
-   * 
-   * @param msg Message to log
-   */
-  void log(const std::string& msg) const;
-  void logError(const std::string& msg) const;
-
+  
   // --- Helper Functions End ---
 
   // --- Download State ---
@@ -257,13 +279,15 @@ private:
   std::vector<uint8_t> currentPieceBuffer_;
 
   int failedHashCount_ = 0;
-  static const int MAX_BAD_HASHES = 3;
+  static constexpr int MAX_BAD_HASHES = 3;
 
   // --- Connection ---
   std::shared_ptr<PeerConnection> conn_; // Socket connection layer
   std::string ip_; // For console logging
 
-  // --- Session ---
+  // --- Dependencies ---
+  std::shared_ptr<IPieceRepository> repo_;
+  std::shared_ptr<IPiecePicker> picker_;
   std::weak_ptr<ITorrentSession> session_;
 
   /** @brief Bitfield of the peer */
