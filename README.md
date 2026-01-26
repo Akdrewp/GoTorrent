@@ -32,7 +32,7 @@ To build GoTorrent, you need a C++17 compliant compiler and the following librar
 
 
 
-1. **Clone the repository:**
+1. **Clone the repository:** \
 ` git clone https://github.com/yourusername/GoTorrent.git `
 `cd GoTorrent`
 
@@ -49,7 +49,7 @@ To build GoTorrent, you need a C++17 compliant compiler and the following librar
 
 Run the executable passing the path to a valid .torrent file and the destination directory.
 
-`./GoTorrent &lt;path/to/file.torrent> &lt;output/directory>`
+`./GoTorrent <path/to/file.torrent> <output/directory>`
 
 
 **Example:**
