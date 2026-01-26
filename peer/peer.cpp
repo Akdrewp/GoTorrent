@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <arpa/inet.h>
+#include "ITorrentSession.h"
 
 // CONSTANTS
 
@@ -117,6 +118,11 @@ void Peer::onMessageReceived(const boost::system::error_code& ec, std::optional<
     if (nextBlockOffset_ > 0 || !inFlightRequests_.empty()) {
       spdlog::info("[{}] Disconnected, un-assigning piece {}", ip_, nextPieceIndex_);
       picker_->onPieceFailed(nextPieceIndex_);
+    }
+
+    // Notify session
+    if (auto session = session_.lock()) {
+      session->onPeerDisconnected(shared_from_this());
     }
 
     // We are disconnected stop

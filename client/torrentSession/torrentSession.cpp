@@ -174,7 +174,7 @@ void TorrentSession::connectToPeers() {
   // Connect to every peer in tracker list
   for (const auto& peerInfo : trackerPeers_) {
 
-    // 1. Create peer
+    // 1. Create peer object
     auto peer = initPeer(io_context_, peerInfo.ip, peerInfo.port, repo_, picker_);
 
     spdlog::info("Attempting async connect to {}:{}", peerInfo.ip, peerInfo.port);
@@ -211,4 +211,25 @@ void TorrentSession::handleInboundConnection(tcp::socket socket) {
   );
   // Add peer to peer lists
   activePeers_.push_back(peer);
+}
+
+/**
+ * @brief CALLBACK for Peer
+ * 
+ * 1. Find peer in activePeers_.
+ * 2. Remove from activePeers_.
+ */
+void TorrentSession::onPeerDisconnected(std::shared_ptr<Peer> peer) {
+  // 1. Find the peer in the vector
+  auto it = std::find(activePeers_.begin(), activePeers_.end(), peer);
+  
+  // 2. If found remove
+  if (it != activePeers_.end()) {
+    spdlog::info("[{}] Peer disconnected. Removing from active list. Remaining: {}", 
+    peer->getIp(), activePeers_.size() - 1);
+        
+    activePeers_.erase(it);
+  } else {
+    spdlog::warn("onPeerDisconnected called for peer that was not found in active list.");
+  }
 }

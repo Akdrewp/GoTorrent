@@ -60,6 +60,13 @@ public:
    */
   void handleInboundConnection(tcp::socket socket);
 
+  /**
+   * @brief Callback for peer
+   * 
+   * Handles a peer disconnect by removing peer from active peers
+   */
+  void onPeerDisconnected(std::shared_ptr<Peer> peer) override;
+
 private:
   /**
    * @brief Starts and runs timer for choking algorithm.

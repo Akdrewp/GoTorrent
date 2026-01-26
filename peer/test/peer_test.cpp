@@ -33,6 +33,7 @@ MATCHER_P3(HasRequestPayload, index, begin, length, "") {
 class MockTorrentSession : public ITorrentSession {
 public:
   // ITorrentSession is mostly empty now, used mainly for lifetime checks (weak_ptr)
+  MOCK_METHOD(void, onPeerDisconnected, (std::shared_ptr<Peer> peer), (override));
 };
 
 class MockPieceRepository : public IPieceRepository {
