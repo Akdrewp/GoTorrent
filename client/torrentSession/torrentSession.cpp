@@ -44,7 +44,7 @@ void TorrentSession::start() {
   // Initialize the Repository (Load existing data, verify files)
   // TODO CHANGE PATH
   std::string DOWNLOAD_PATH = "./downloads"; 
-  repo_->initialize(DOWNLOAD_PATH); // Assumes repo needs path initialization
+  repo_->initialize(DOWNLOAD_PATH);
 
   startChokingTimer();
 
